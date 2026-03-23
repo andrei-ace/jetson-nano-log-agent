@@ -2,37 +2,21 @@
 
 import os
 import re
-import shlex
 import subprocess
 import sys
 
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 LOG_DIR = os.environ.get("LOG_DIR", "/workspace/demo_logs")
-MAX_OUTPUT = 4000
+MAX_OUTPUT = 2000
 CMD_TIMEOUT = 10
-
-ALLOWED_CMDS = frozenset(
-    ["rg", "grep", "sed", "awk", "head", "tail", "cat", "ls", "wc",
-     "find", "sort", "uniq", "cut", "tr", "diff", "xargs", "date"]
-)
-
-DANGEROUS_RE = re.compile(
-    r"|".join([
-        r"\brm\b", r"\bmv\b", r"\bcp\b", r"\bchmod\b", r"\bchown\b",
-        r"\bsudo\b", r"\bcurl\b", r"\bwget\b", r"\bnc\b", r"\bncat\b",
-        r"\bdd\b", r"\bmkfs\b", r"\bpython[23]?\b", r"\bperl\b",
-        r"\bruby\b", r"\bbash\b", r"\bsh\b", r"\bzsh\b",
-        r">>?\s", r"\|&", r"&\s*$", r"&\s*;",
-        r"\.\./", r"`",
-    ])
-)
 
 SHELL_ENV = {
     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -47,32 +31,14 @@ SHELL_ENV = {
 
 @tool
 def shell(command: str) -> str:
-    """Run a read-only shell command. Available: grep, awk, sed, head, tail, cat, ls, wc, find, sort, uniq, cut, tr, diff, xargs, date. Pipes allowed. cwd is the logs folder.
+    """Run a shell command. cwd is the logs folder. Pipes allowed.
 
     Examples:
         shell("date -u '+%Y-%m-%dT%H:%M:%SZ'")
         shell("grep ERROR *.log")
         shell("grep 'sess-a1b2c3' *.log")
-        shell("grep ERROR *.log | grep '2026-03-23T18:'")
-        shell("awk '/throttle/{print}' thermal.log | head -20")
+        shell("awk '$1 >= \"2026-03-23T19:00\"' app.log | grep ERROR")
     """
-    for segment in command.split("|"):
-        segment = segment.strip()
-        if not segment:
-            continue
-        try:
-            tokens = shlex.split(segment)
-        except ValueError as exc:
-            return f"Parse error: {exc}"
-        if not tokens:
-            continue
-        cmd_name = os.path.basename(tokens[0])
-        if cmd_name not in ALLOWED_CMDS:
-            return f"Blocked: '{cmd_name}' is not allowed."
-
-    if DANGEROUS_RE.search(command):
-        return "Blocked: disallowed pattern."
-
     try:
         result = subprocess.run(
             command, shell=True, cwd=LOG_DIR, timeout=CMD_TIMEOUT,
@@ -94,21 +60,40 @@ def shell(command: str) -> str:
 PROMPT = """\
 You investigate Jetson Orin Nano hardware logs. Be concise.
 
-Files: app.log (ISO timestamps), thermal.log (syslog timestamps), dmesg.log (boot-seconds). All UTC.
+Files (all UTC):
+- app.log: ISO timestamps, levels: ERROR/WARN/INFO
+- thermal.log: syslog timestamps, levels: ERROR/WARN/INFO
+- dmesg.log: [seconds-since-boot], keywords: CRITICAL/WARNING
 
 RULES:
-1. For time questions ("past hour", "recently"), FIRST get current time, then filter.
-2. Always use *.log to search all files.
+1. For time questions, FIRST get current time, then filter.
+2. Always check ALL three files.
 3. Keep answers short — facts and evidence only.
 
-TIMESTAMP FILTERING (app.log only — ISO timestamps sort lexically):
-  shell("awk '$1 >= \"2026-03-23T19:00\"' app.log | grep ERROR")
-  shell("awk '$1 >= \"2026-03-23T19:00\"' app.log | grep WARN | head -20")
-NOTE: awk filters ONE file at a time. To search all files, run grep first:
-  shell("grep ERROR *.log")
-Then filter by time with awk on a specific file.
-To get current time:
-  shell("date -u '+%Y-%m-%dT%H:%M:%SZ'")"""
+COMMANDS:
+  date -u '+%Y-%m-%dT%H:%M:%SZ'           # current UTC time
+  grep ERROR app.log | awk '$1 >= "CUTOFF"' # filter app.log by time
+  grep ERROR thermal.log                    # thermal.log errors
+  grep CRITICAL dmesg.log                   # kernel critical events"""
+
+
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_old_thinking(state):
+    """Pre-model hook: strip <think> from previous turns, keep current turn's thinking."""
+    messages = state["messages"]
+    # Find the last user message — everything before it is a previous turn
+    last_user_idx = 0
+    for i, msg in enumerate(messages):
+        if hasattr(msg, "type") and msg.type == "human":
+            last_user_idx = i
+    cleaned = []
+    for i, msg in enumerate(messages):
+        if i < last_user_idx and hasattr(msg, "content") and isinstance(msg.content, str) and "<think>" in msg.content:
+            msg = msg.model_copy(update={"content": THINK_RE.sub("", msg.content).strip()})
+        cleaned.append(msg)
+    return {"messages": cleaned}
 
 
 def build_agent():
@@ -118,7 +103,11 @@ def build_agent():
         model=os.environ.get("OPENAI_MODEL", "local-model"),
         temperature=0.6,
     )
-    return create_react_agent(model=llm, tools=[shell], prompt=PROMPT)
+    return create_react_agent(
+        model=llm, tools=[shell], prompt=PROMPT,
+        pre_model_hook=_strip_old_thinking,
+        checkpointer=MemorySaver(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +120,6 @@ RESET = "\033[0m"
 
 
 def _print_thinking(text: str):
-    """Print text dimmed as reasoning."""
-    # Strip <think> tags if present
     text = re.sub(r"</?think>", "", text).strip()
     if text:
         for line in text.split("\n"):
@@ -140,8 +127,7 @@ def _print_thinking(text: str):
 
 
 def _print_answer(text: str):
-    """Print final answer, stripping any <think> blocks."""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = THINK_RE.sub("", text).strip()
     if text:
         print(f"\n{text}\n")
 
@@ -162,8 +148,10 @@ def main():
             break
 
         print()
+        config = {"configurable": {"thread_id": "session"}}
         for chunk in agent.stream(
             {"messages": [{"role": "user", "content": question}]},
+            config=config,
             stream_mode="updates",
         ):
             for node_name, update in chunk.items():
@@ -171,19 +159,16 @@ def main():
                     msg = update["messages"][-1]
                     has_tools = hasattr(msg, "tool_calls") and msg.tool_calls
                     content = msg.content if hasattr(msg, "content") else ""
-                    # Check additional_kwargs for reasoning
                     reasoning = getattr(msg, "additional_kwargs", {}).get("reasoning_content", "")
                     if reasoning:
                         _print_thinking(reasoning)
                     if has_tools:
-                        # Content alongside tool calls = thinking
                         if content:
                             _print_thinking(content)
                         for tc in msg.tool_calls:
                             cmd = tc.get("args", {}).get("command", "")
                             print(f"  $ {cmd}")
                     elif content:
-                        # Content without tool calls = final answer
                         _print_answer(content)
                 elif node_name == "tools":
                     for msg in update["messages"]:
