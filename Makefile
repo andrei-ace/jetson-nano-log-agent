@@ -67,7 +67,7 @@ server: $(MODEL_DIR)/$(MODEL_NAME)
 		--model $(MODEL_DIR)/$(MODEL_NAME) \
 		--port 8080 \
 		--n-gpu-layers -1 \
-		--ctx-size 4096
+		--ctx-size 16384
 
 $(MODEL_DIR)/$(MODEL_NAME):
 	$(MAKE) download-model

@@ -15,7 +15,7 @@ from langgraph.prebuilt import create_react_agent
 # ---------------------------------------------------------------------------
 
 LOG_DIR = os.environ.get("LOG_DIR", "/workspace/demo_logs")
-MAX_OUTPUT = 8000
+MAX_OUTPUT = 4000
 CMD_TIMEOUT = 10
 
 ALLOWED_CMDS = frozenset(
@@ -30,7 +30,7 @@ DANGEROUS_RE = re.compile(
         r"\bdd\b", r"\bmkfs\b", r"\bpython[23]?\b", r"\bperl\b",
         r"\bruby\b", r"\bbash\b", r"\bsh\b", r"\bzsh\b",
         r">>?\s", r"\|&", r"&\s*$", r"&\s*;",
-        r"\.\./", r"`", r"\$\(",
+        r"\.\./", r"`",
     ])
 )
 
@@ -130,19 +130,20 @@ DIM = "\033[2m"
 RESET = "\033[0m"
 
 
-def _print_content(text: str):
-    """Print model output with <think> blocks dimmed and the rest normal."""
-    parts = re.split(r"(<think>.*?</think>)", text, flags=re.DOTALL)
-    for part in parts:
-        if part.startswith("<think>"):
-            thinking = part[7:-8].strip()
-            if thinking:
-                for line in thinking.split("\n"):
-                    print(f"{DIM}  {line}{RESET}")
-        else:
-            clean = part.strip()
-            if clean:
-                print(f"\n{clean}\n")
+def _print_thinking(text: str):
+    """Print text dimmed as reasoning."""
+    # Strip <think> tags if present
+    text = re.sub(r"</?think>", "", text).strip()
+    if text:
+        for line in text.split("\n"):
+            print(f"{DIM}  {line}{RESET}")
+
+
+def _print_answer(text: str):
+    """Print final answer, stripping any <think> blocks."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if text:
+        print(f"\n{text}\n")
 
 
 def main():
@@ -168,17 +169,22 @@ def main():
             for node_name, update in chunk.items():
                 if node_name == "agent":
                     msg = update["messages"][-1]
-                    # Show reasoning/thinking if present
+                    has_tools = hasattr(msg, "tool_calls") and msg.tool_calls
+                    content = msg.content if hasattr(msg, "content") else ""
+                    # Check additional_kwargs for reasoning
                     reasoning = getattr(msg, "additional_kwargs", {}).get("reasoning_content", "")
                     if reasoning:
-                        for line in reasoning.strip().split("\n"):
-                            print(f"{DIM}  {line}{RESET}")
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        _print_thinking(reasoning)
+                    if has_tools:
+                        # Content alongside tool calls = thinking
+                        if content:
+                            _print_thinking(content)
                         for tc in msg.tool_calls:
                             cmd = tc.get("args", {}).get("command", "")
                             print(f"  $ {cmd}")
-                    if hasattr(msg, "content") and msg.content:
-                        _print_content(msg.content)
+                    elif content:
+                        # Content without tool calls = final answer
+                        _print_answer(content)
                 elif node_name == "tools":
                     for msg in update["messages"]:
                         content = msg.content if hasattr(msg, "content") else str(msg)
