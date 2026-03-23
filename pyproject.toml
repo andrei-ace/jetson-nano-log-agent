@@ -1,0 +1,11 @@
+[project]
+name = "jetson-log-agent"
+version = "0.1.0"
+description = "ReAct agent with sub-agents for investigating logs on Jetson Orin Nano"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "langchain-openai>=0.3,<1",
+    "langgraph>=0.2,<1",
+]
