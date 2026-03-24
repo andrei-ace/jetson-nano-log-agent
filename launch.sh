@@ -10,11 +10,21 @@ if [[ ! -d "$SCRIPT_DIR/.venv" ]]; then
 fi
 
 echo "Installing dependencies..."
-uv pip install --python "$SCRIPT_DIR/.venv/bin/python" 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1'
+uv pip install --python "$SCRIPT_DIR/.venv/bin/python" 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1' 'fastembed>=0.4,<1' 'faiss-cpu>=1.7,<2'
 
 # ── Generate logs with current timestamps ────────────────────────────────────
 echo "Generating logs..."
 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/gen_logs.py"
+
+# ── Build RAG index (skip if already built and field manual unchanged) ────────
+INDEX_DIR="$SCRIPT_DIR/kb_index"
+if [[ ! -f "$INDEX_DIR/index.faiss" ]] || [[ "$SCRIPT_DIR/field_manual.md" -nt "$INDEX_DIR/index.faiss" ]]; then
+    echo "Building field manual index..."
+    "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/build_index.py"
+fi
+
+# ── Ensure output dir exists ───────────────────────────────────────────────
+mkdir -p "$SCRIPT_DIR/output"
 
 # ── Resolve paths ───────────────────────────────────────────────────────────
 VENV_DIR="$(readlink -f "$SCRIPT_DIR/.venv")"
@@ -34,12 +44,15 @@ exec bwrap \
     --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
     --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
     --ro-bind-try /etc/ssl /etc/ssl \
+    --ro-bind /sys /sys \
     --proc /proc \
     --dev /dev \
     --tmpfs /tmp \
     --ro-bind "$VENV_DIR" /workspace/.venv \
     --ro-bind "$SCRIPT_DIR/run_agent.py" /workspace/run_agent.py \
     --ro-bind "$SCRIPT_DIR/demo_logs" /workspace/demo_logs \
+    --bind "$SCRIPT_DIR/kb_index" /workspace/kb_index \
+    --bind "$SCRIPT_DIR/output" /workspace/output \
     --unshare-pid \
     --unshare-ipc \
     --unshare-uts \
@@ -50,6 +63,8 @@ exec bwrap \
     --setenv LANG "C.UTF-8" \
     --setenv PYTHONDONTWRITEBYTECODE "1" \
     --setenv LOG_DIR "/workspace/demo_logs" \
+    --setenv KB_DIR "/workspace/kb_index" \
+    --setenv EMAIL_LOG "/workspace/output/sent_emails.log" \
     --setenv OPENAI_BASE_URL "${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}" \
     --setenv OPENAI_API_KEY "${OPENAI_API_KEY:-not-needed}" \
     --setenv OPENAI_MODEL "${OPENAI_MODEL:-local-model}" \

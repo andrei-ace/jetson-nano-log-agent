@@ -6,7 +6,10 @@ LLAMA_SERVER := /opt/llama.cpp/build/bin/llama-server
 
 export PATH := .venv/bin:$(HOME)/.local/bin:$(PATH)
 
-.PHONY: deploy setup install hf-login download-model server gen-logs run help
+SWAP_SIZE    := 8G
+SWAP_FILE    := /ssd/swapfile
+
+.PHONY: deploy setup install hf-login download-model server gen-logs build-index swap help
 
 help:
 	@echo "From dev machine:"
@@ -14,12 +17,12 @@ help:
 	@echo "  make setup          - Deploy + install + download model on Jetson"
 	@echo ""
 	@echo "On Jetson (cd /ssd/jetson-log-agent):"
+	@echo "  make swap           - Create 8G swap on SSD (idempotent)"
 	@echo "  make install        - Create venv and install deps"
 	@echo "  make download-model - Download Nemotron-3 Nano 4B GGUF"
 	@echo "  make server         - Start llama-server (auto-downloads model)"
 	@echo "  make gen-logs       - Regenerate logs anchored to current time"
-	@echo "  make run            - Gen logs + run agent (no sandbox)"
-	@echo "  ./launch.sh         - Run agent in bwrap sandbox"
+	@echo "  ./launch.sh         - Gen logs + run agent in bwrap sandbox"
 
 # ── Dev machine ─────────────────────────────────────────────────────────────
 
@@ -31,17 +34,19 @@ deploy:
 		--exclude '*.egg-info/' \
 		--exclude '.git/' \
 		--exclude 'models/' \
+		--exclude 'kb_index/' \
+		--exclude 'output/' \
 		./ $(REMOTE):$(REMOTE_DIR)/
 
 setup: deploy
-	ssh $(REMOTE) 'cd $(REMOTE_DIR) && make install && make download-model'
+	ssh $(REMOTE) 'cd $(REMOTE_DIR) && make swap && make install && make download-model'
 
 # ── On Jetson ───────────────────────────────────────────────────────────────
 
 install:
 	@command -v uv >/dev/null 2>&1 || { echo "Installing uv..." && curl -LsSf https://astral.sh/uv/install.sh | sh; }
 	uv venv
-	uv pip install --python .venv/bin/python 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1'
+	uv pip install --python .venv/bin/python 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1' 'fastembed>=0.4,<1' 'faiss-cpu>=1.7,<2'
 
 HF_MODEL_URL := https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF/resolve/main/$(MODEL_NAME)
 
@@ -67,7 +72,7 @@ server: $(MODEL_DIR)/$(MODEL_NAME)
 		--model $(MODEL_DIR)/$(MODEL_NAME) \
 		--port 8080 \
 		--n-gpu-layers -1 \
-		--ctx-size 8192 \
+		--ctx-size 16384 \
 		--reasoning-format none
 
 $(MODEL_DIR)/$(MODEL_NAME):
@@ -76,5 +81,18 @@ $(MODEL_DIR)/$(MODEL_NAME):
 gen-logs:
 	python gen_logs.py
 
-run: gen-logs
-	LOG_DIR=./demo_logs python run_agent.py
+build-index:
+	python build_index.py
+
+swap:
+	@if swapon --show | grep -q $(SWAP_FILE); then \
+		echo "Swap already active: $(SWAP_FILE)"; \
+	else \
+		echo "Creating $(SWAP_SIZE) swap at $(SWAP_FILE)..."; \
+		sudo fallocate -l $(SWAP_SIZE) $(SWAP_FILE); \
+		sudo chmod 600 $(SWAP_FILE); \
+		sudo mkswap $(SWAP_FILE); \
+		sudo swapon $(SWAP_FILE); \
+		echo "$(SWAP_FILE) none swap sw 0 0" | sudo tee -a /etc/fstab > /dev/null; \
+		echo "Swap enabled (persistent across reboots)"; \
+	fi
