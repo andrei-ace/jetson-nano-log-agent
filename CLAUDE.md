@@ -39,7 +39,7 @@ make build-index        # Rebuild FAISS index from field_manual.md
 - Incident (thermal throttle cascade) placed ~2h ago
 - Normal 5s ticks + occasional misc events fill the rest
 
-`launch.sh` — regenerates logs, then execs into bwrap sandbox with read-only mounts and clean env.
+`launch.sh` — regenerates logs, sets up socat network bridge (sandbox can only reach llama-server), then execs into bwrap sandbox with read-only mounts, network isolation, and clean env. Requires `socat` and `bubblewrap`.
 
 `demo_logs/` — generated files:
 - `app.log` — inference pipeline supervisor (TensorRT, latency, fps, GPU metrics)

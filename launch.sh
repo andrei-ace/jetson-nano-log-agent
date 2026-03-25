@@ -29,10 +29,25 @@ mkdir -p "$SCRIPT_DIR/output"
 # ── Resolve paths ───────────────────────────────────────────────────────────
 VENV_DIR="$(readlink -f "$SCRIPT_DIR/.venv")"
 
+# ── Set up network bridge (socat) for sandbox ──────────────────────────────
+# The sandbox uses --unshare-net for network isolation. A socat bridge
+# forwards a Unix socket to the llama-server on the host, so the agent
+# can only reach 127.0.0.1:8080 — nothing else.
+BRIDGE_SOCK="$SCRIPT_DIR/.llama-bridge.sock"
+rm -f "$BRIDGE_SOCK"
+socat UNIX-LISTEN:"$BRIDGE_SOCK",fork TCP:127.0.0.1:${LLAMA_PORT:-8080} &
+BRIDGE_PID=$!
+cleanup() { kill "$BRIDGE_PID" 2>/dev/null; rm -f "$BRIDGE_SOCK"; }
+trap cleanup EXIT
+
+# Wait for socket to be created
+for _ in $(seq 1 20); do [ -S "$BRIDGE_SOCK" ] && break; sleep 0.1; done
+if [[ ! -S "$BRIDGE_SOCK" ]]; then
+    echo "ERROR: socat bridge failed to start" >&2
+    exit 1
+fi
+
 # ── Launch in bwrap sandbox ─────────────────────────────────────────────────
-# Note: --unshare-net is NOT used because the agent needs localhost access
-# to reach the llama-server. The shell tool's command allowlist blocks
-# networking tools (curl, wget, nc).
 echo "Launching agent in sandbox..."
 exec bwrap \
     --ro-bind /usr /usr \
@@ -44,18 +59,20 @@ exec bwrap \
     --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
     --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
     --ro-bind-try /etc/ssl /etc/ssl \
-    --ro-bind /sys /sys \
+    --ro-bind /sys/devices/system/cpu /sys/devices/system/cpu \
     --proc /proc \
     --dev /dev \
     --tmpfs /tmp \
     --ro-bind "$VENV_DIR" /workspace/.venv \
     --ro-bind "$SCRIPT_DIR/run_agent.py" /workspace/run_agent.py \
     --ro-bind "$SCRIPT_DIR/demo_logs" /workspace/demo_logs \
-    --bind "$SCRIPT_DIR/kb_index" /workspace/kb_index \
+    --ro-bind "$SCRIPT_DIR/kb_index" /workspace/kb_index \
     --bind "$SCRIPT_DIR/output" /workspace/output \
+    --ro-bind "$BRIDGE_SOCK" /workspace/llama.sock \
     --unshare-pid \
     --unshare-ipc \
     --unshare-uts \
+    --unshare-net \
     --clearenv \
     --setenv PATH "/workspace/.venv/bin:/usr/bin:/bin" \
     --setenv VIRTUAL_ENV "/workspace/.venv" \
@@ -70,4 +87,4 @@ exec bwrap \
     --setenv OPENAI_MODEL "${OPENAI_MODEL:-local-model}" \
     --die-with-parent \
     --chdir /workspace \
-    -- /workspace/.venv/bin/python /workspace/run_agent.py
+    -- /bin/sh -c 'socat TCP-LISTEN:8080,fork,bind=127.0.0.1 UNIX-CONNECT:/workspace/llama.sock & exec /workspace/.venv/bin/python /workspace/run_agent.py'

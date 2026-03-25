@@ -44,15 +44,21 @@ setup: deploy
 # ── On Jetson ───────────────────────────────────────────────────────────────
 
 install:
-	@command -v uv >/dev/null 2>&1 || { echo "Installing uv..." && curl -LsSf https://astral.sh/uv/install.sh | sh; }
+	@command -v uv >/dev/null 2>&1 || { echo "Installing uv 0.6.x..." && curl -LsSf https://astral.sh/uv/0.6/install.sh | sh; }
 	uv venv
 	uv pip install --python .venv/bin/python 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1' 'fastembed>=0.4,<1' 'faiss-cpu>=1.7,<2'
 
-HF_MODEL_URL := https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF/resolve/main/$(MODEL_NAME)
+HF_MODEL_REV := e0f60ca53a1e42e9a0e36e693690a3ab8a867c90
+HF_MODEL_URL := https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF/resolve/$(HF_MODEL_REV)/$(MODEL_NAME)
+# SHA256 of NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf at the pinned revision.
+# To update: download the model and run sha256sum on it, then replace this value.
+MODEL_SHA256 := SKIP
 
 download-model:
 	mkdir -p $(MODEL_DIR)
-	@if [ -f ~/.cache/huggingface/token ]; then \
+	@if [ -f $(MODEL_DIR)/$(MODEL_NAME) ]; then \
+		echo "Model already downloaded."; \
+	elif [ -f ~/.cache/huggingface/token ]; then \
 		echo "Downloading with HF token..."; \
 		curl -L --progress-bar \
 			-H "Authorization: Bearer $$(cat ~/.cache/huggingface/token)" \
@@ -61,6 +67,13 @@ download-model:
 		echo "WARNING: No HF token found, download may be slow. Run 'make hf-login' first."; \
 		curl -L --progress-bar \
 			-o $(MODEL_DIR)/$(MODEL_NAME) $(HF_MODEL_URL); \
+	fi
+	@if [ "$(MODEL_SHA256)" != "SKIP" ]; then \
+		echo "Verifying checksum..."; \
+		echo "$(MODEL_SHA256)  $(MODEL_DIR)/$(MODEL_NAME)" | sha256sum -c -; \
+	else \
+		echo "NOTE: Set MODEL_SHA256 in Makefile to enable integrity check."; \
+		echo "  sha256sum $(MODEL_DIR)/$(MODEL_NAME)"; \
 	fi
 
 hf-login:
