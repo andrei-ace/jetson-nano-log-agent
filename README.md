@@ -1,74 +1,255 @@
-# Jetson Log Investigation Agent
+# Jetson Log Agent
 
-A ReAct agent that uses shell commands to investigate hardware and inference
-pipeline logs, sandboxed with bubblewrap. Designed for Jetson Orin Nano
-running Nemotron-3 Nano 4B via `llama-server`.
+Autonomous log investigation agent for NVIDIA Jetson Orin Nano. Searches hardware and inference pipeline logs, diagnoses root causes using a RAG-powered field manual, and escalates critical issues via email — all running locally on a 4B parameter LLM.
 
-## How it works
+## Architecture
 
-Single agent with one tool (`shell`) that runs read-only commands (grep, awk,
-sed, head, tail, date, etc.) against synthetic log files. The agent figures out
-what commands to run based on your question.
+Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 Nano 4B):
 
-Logs are generated fresh each run with timestamps anchored to now. The incident
-(thermal throttle cascade from adding a 3rd camera pipeline) is placed ~2 hours
-ago.
-
-## Log files
-
-- **app.log** — Inference pipeline supervisor: TensorRT, batch latency/fps,
-  GPU utilization, memory, power, frame drops, deadline misses
-- **thermal.log** — Tegra thermal daemon: thermal zones, fan PWM/RPM, DVFS
-  throttle events
-- **dmesg.log** — Kernel ring buffer: nvgpu driver, tegra-pmc power rails,
-  thermal trip points
-
-## Setup (Jetson Orin Nano, Ubuntu 22.04 / JetPack 6.x)
-
-```bash
-sudo apt install bubblewrap ripgrep
+```
+                     ┌──────────────────────────────┐
+                     │      Main Agent (Router)      │
+                     │                               │
+                     │  search_logs    consult_manual │
+                     │  send_email     reboot_device  │
+                     └──────┬───────────────┬────────┘
+                            │               │
+               ┌────────────▼───┐   ┌───────▼──────────┐
+               │  Log Search    │   │ Manual Consultant │
+               │  Sub-Agent     │   │ Sub-Agent         │
+               │                │   │                   │
+               │  Tool: shell   │   │ Tool:             │
+               │  (grep, awk,   │   │ search_manual     │
+               │   date)        │   │ (FAISS + embed)   │
+               └───────┬────────┘   └────────┬──────────┘
+                       │                     │
+                  demo_logs/           field_manual.md
+              app.log thermal.log      (12 incident
+               dmesg.log                sections)
 ```
 
-`llama-server` expected at `/opt/llama.cpp/build/bin/llama-server`.
+**Main agent** follows an investigation procedure loaded from the field manual. It delegates log searching and manual lookups to specialized sub-agents, then decides whether to email ops or reboot.
 
-### From dev machine
+**Log search sub-agent** knows the three log formats (ISO timestamps, syslog, dmesg seconds-since-boot) and the correct shell commands to filter each. Given a time window, it runs the queries and returns raw error lines.
+
+**Manual consultant sub-agent** searches a FAISS-indexed field manual using dense embeddings (BAAI/bge-small-en-v1.5 via fastembed). Returns severity, root causes, and recommended actions for each error.
+
+## Synthetic Log Scenario
+
+`gen_logs.py` generates 24 hours of realistic logs anchored to the current time. An incident is placed ~2 hours ago:
+
+1. A third inference pipeline (camera-03) starts, pushing GPU utilization to 95%
+2. Temperature rises rapidly — fan ramps to 100%
+3. GPU thermal throttle triggers at 70.5°C — clocks drop 918 → 624 MHz
+4. Inference deadline misses cascade across all three pipelines
+5. Deep throttle at 73°C — clocks drop further to 420 MHz
+6. Inference queue fills (32/32) — pipeline stalls
+7. Load shedding: camera-03 suspended, TensorRT engine unloaded
+8. Recovery over 30 seconds — clocks restore, pipelines stabilize
+9. Camera-03 restarts after 60 seconds
+
+Three log files:
+
+| File | Timestamp format | Levels |
+|------|-----------------|--------|
+| `app.log` | ISO (`2026-03-24T17:00:00.000Z`) | `level=ERROR/WARN/INFO` |
+| `thermal.log` | Syslog (`Mar 24 17:00:00`) | `ERROR/WARN/INFO` |
+| `dmesg.log` | Seconds since boot (`[82810.000000]`) | `CRITICAL/WARNING` |
+
+## Field Manual
+
+`field_manual.md` is the single source of truth for agent behavior. It contains:
+
+- **Investigation Procedure** — the workflow the agent follows (search logs → look up errors → escalate → summarize)
+- **12 incident sections** — each with severity, log signatures, root causes, and recommended actions
+
+| Section | Severity |
+|---------|----------|
+| Thermal Throttle — GPU Over-Temperature | Critical |
+| Thermal Throttle — Sustained / Deep Throttle | Critical |
+| Rapid Temperature Increase | High |
+| Power Budget Exceeded | High |
+| Inference Deadline Miss | High |
+| Inference Latency Degradation | Medium |
+| Frame Drops — Inference Backpressure | High |
+| Inference Queue Full — Pipeline Stall | Critical |
+| Pipeline Degraded Mode | High |
+| Pipeline Suspended — Load Shedding | Critical |
+| GPU Memory Warning | Medium |
+| RTSP Stream Hiccup | Low |
+
+Updating the manual changes how the agent investigates — no code changes needed. The FAISS index is rebuilt automatically when the manual changes.
+
+## Prerequisites
+
+**Hardware:**
+- NVIDIA Jetson Orin Nano (8GB)
+- SSD storage (model, swap, project files)
+
+**Software on Jetson:**
+- JetPack 6.x (Ubuntu 22.04, Python 3.10+)
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) built at `/opt/llama.cpp/build/bin/`
+- [bubblewrap](https://github.com/containers/bubblewrap) — `sudo apt install bubblewrap`
+- [uv](https://github.com/astral-sh/uv) — installed automatically by `make install`
+
+**Dev machine (for remote deployment):**
+- SSH access to Jetson
+- rsync
+
+## Setup
+
+### One-shot from dev machine
 
 ```bash
-make deploy     # rsync to Jetson
-make setup      # deploy + install + download model
+git clone https://github.com/andrei-ace/jetson-nano-log-agent.git
+cd jetson-nano-log-agent
+
+# Edit REMOTE in Makefile if your Jetson hostname differs
+make setup
 ```
 
-### On the Jetson
+This SSHs into the Jetson and:
+1. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
+2. Creates Python venv with uv
+3. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
+4. Downloads Nemotron-3 Nano 4B GGUF (~1.9 GB)
+
+### Manual setup on Jetson
 
 ```bash
 cd /ssd/jetson-log-agent
-make server     # terminal 1: starts llama-server (auto-downloads model)
-./launch.sh     # terminal 2: gen logs + run agent in sandbox
+make swap             # 8G swapfile on SSD (idempotent, persistent)
+make install          # venv + deps
+make download-model   # Nemotron-3 Nano 4B GGUF
 ```
 
-Or without sandbox: `make run`
+## Running
 
-### Environment variables
+**Terminal 1** — start the LLM server:
 
-| Variable | Default | Description |
-|---|---|---|
-| `OPENAI_BASE_URL` | `http://127.0.0.1:8080/v1` | llama-server endpoint |
-| `OPENAI_API_KEY` | `not-needed` | API key (any string for local) |
-| `OPENAI_MODEL` | `local-model` | Model name (informational) |
+```bash
+make server
+```
 
-## Example questions
+Starts llama-server on port 8080 with all layers on GPU and 16K context.
+
+**Terminal 2** — launch the agent:
+
+```bash
+./launch.sh
+```
+
+This generates fresh logs, builds the FAISS index if needed, and launches the agent inside a bubblewrap sandbox.
 
 ```
-any errors in past 3 hours?
-what caused pipeline camera-03 to be suspended?
-trace session sess-a1b2c3
-what was the GPU temperature timeline during the incident?
-how many inference deadline misses occurred?
-did the fan reach maximum speed?
+Jetson Log Agent ready. Type your question (or 'quit' to exit).
+
+You: any errors in the past 2 hours?
+```
+
+### Example session
+
+```
+You: any errors past 2 hours?
+
+  [logs] last 2 hours
+    [logs] $ date -u '+%Y-%m-%dT%H:%M'
+    [logs] 2026-03-24T18:27
+    [logs] $ date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M'
+    [logs] 2026-03-24T16:27
+    [logs] $ awk -v cutoff=2026-03-24T16:27 '$1 >= cutoff' app.log | grep -E 'level=ERROR|level=WARN'
+    [logs] 2026-03-24T16:27:14Z level=ERROR component=thermal msg="GPU thermal throttle activated" ...
+    [logs] ...
+    [logs] $ grep -E 'ERROR|WARN' thermal.log
+    [logs] Mar 24 16:10:54 ERROR: GPU thermal throttle triggered: gpu=70.5C ...
+    [logs] ...
+    [logs] $ grep -E 'CRITICAL|WARNING' dmesg.log
+    [logs] [82810.000000] tegra-thermal: CRITICAL: zone1(gpu) exceeded trip point 70000mC
+    [logs] ...
+  [manual] GPU thermal throttle triggered
+    [manual] search: GPU thermal throttle triggered
+    [manual] ## Thermal Throttle — GPU Over-Temperature
+    [manual] **Severity:** Critical
+    [manual] ...
+  [email] To: ops-team@company.com | CRITICAL: GPU Thermal Throttle on Jetson-07
+
+  [EMAIL SENT] To: ops-team@company.com | Subject: CRITICAL: GPU Thermal Throttle on Jetson-07
+
+Critical GPU thermal throttle detected ~2h ago on jetson-07:
+- GPU reached 70.5°C, clocks reduced 918→624→420 MHz
+- Inference deadline misses across all pipelines
+- Camera-03 suspended via load shedding, recovered after 60s
+
+Recommended: inspect enclosure airflow, verify fan profile,
+lower TensorRT batch size. Email sent to ops.
+```
+
+The agent:
+1. Delegates log searching to the log sub-agent (cyan `[logs]` prefix)
+2. Looks up each error in the field manual via the manual sub-agent (green `[manual]` prefix)
+3. Sends an email with error details and recommended actions (yellow `[email]`)
+4. Summarizes findings with evidence and root cause chain
+
+### Viewing action log
+
+Emails and reboot commands are persisted to `output/actions.log`:
+
+```bash
+cat output/actions.log
 ```
 
 ## Sandbox
 
-Bubblewrap provides: read-only filesystem, PID/IPC/UTS namespace isolation,
-clean environment, minimal /dev. Network is NOT isolated (agent needs
-localhost to reach llama-server); shell tool blocks networking commands.
+The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox:
+
+| Mount | Mode | Purpose |
+|-------|------|---------|
+| /usr, /bin, /lib, /etc, /sys | Read-only | System libraries and config |
+| .venv, run_agent.py, demo_logs | Read-only | Agent code and log files |
+| kb_index/ | Read-write | FAISS index + embedding model cache |
+| output/ | Read-write | Action log (emails, reboots) |
+| /tmp | tmpfs | Ephemeral scratch space |
+
+Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is NOT isolated (agent needs localhost:8080 for the LLM server).
+
+## Project Structure
+
+```
+├── run_agent.py        # Three-agent system (main router + 2 sub-agents)
+├── build_index.py      # Offline FAISS index builder
+├── gen_logs.py         # Synthetic log generator (24h + thermal incident)
+├── field_manual.md     # Incident runbook (12 sections, RAG source of truth)
+├── launch.sh           # Log gen + index build + bwrap sandbox launcher
+├── Makefile            # Deploy, install, server, swap targets
+├── pyproject.toml      # Python dependencies
+├── demo_logs/          # Generated: app.log, thermal.log, dmesg.log
+├── kb_index/           # Built: index.faiss, chunks.json, model_cache/
+└── output/             # Persisted: actions.log (emails, reboots)
+```
+
+## Makefile Targets
+
+| Target | Run from | Description |
+|--------|----------|-------------|
+| `make deploy` | Dev machine | Rsync project to Jetson |
+| `make setup` | Dev machine | Deploy + swap + install + download model |
+| `make swap` | Jetson | Create 8G SSD swapfile (idempotent) |
+| `make install` | Jetson | Create venv, install Python deps |
+| `make download-model` | Jetson | Download Nemotron-3 Nano 4B GGUF (~1.9 GB) |
+| `make hf-login` | Jetson | Authenticate with HuggingFace (faster downloads) |
+| `make server` | Jetson | Start llama-server on port 8080 |
+| `make gen-logs` | Jetson | Regenerate logs with current timestamps |
+| `make build-index` | Jetson | Rebuild FAISS index from field manual |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_DIR` | `/workspace/demo_logs` | Log files directory |
+| `KB_DIR` | `/workspace/kb_index` | FAISS index directory |
+| `ACTION_LOG` | `/workspace/output/actions.log` | Email/reboot action log |
+| `OPENAI_BASE_URL` | `http://127.0.0.1:8080/v1` | llama-server endpoint |
+| `OPENAI_API_KEY` | `not-needed` | API key (any string for local) |
+| `OPENAI_MODEL` | `local-model` | Model name passed to ChatOpenAI |
+
+All set automatically by `launch.sh` inside the sandbox.
