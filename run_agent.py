@@ -266,19 +266,21 @@ def _run_subagent(agent, label: str, color: str, user_msg: str,
 LOG_SEARCH_PROMPT = """\
 Search Jetson log files for errors using shell commands.
 
-Compute cutoffs, then search all three files:
-  ISO_CUT=$(date -u -d 'N hours ago' '+%%Y-%%m-%%dT%%H:%%M')
-  SYS_CUT=$(date -u -d 'N hours ago' '+%%H:%%M:%%S')
+STEP 1: Compute cutoffs.
+  ISO_CUT=$(date -u -d 'N hours ago' '+%Y-%m-%dT%H:%M')
+  SYS_CUT=$(date -u -d 'N hours ago' '+%H:%M:%S')
   DMESG_LAST=$(tail -1 dmesg.log | sed 's/\\[\\([0-9.]*\\)\\].*/\\1/')
   DMESG_CUT=$(echo "$DMESG_LAST - SECONDS" | bc)
 
-  echo "=== app.log ===" && awk -v c=$ISO_CUT '$1>=c' app.log | grep -E 'level=ERROR|level=WARN'
-  echo "=== thermal.log ===" && awk -v c=$SYS_CUT '$3>=c' thermal.log | grep -E 'ERROR|WARN'
-  echo "=== dmesg.log ===" && awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c' dmesg.log | grep -E 'CRITICAL|WARNING'
+STEP 2: Get error counts per type (compact output).
+  awk -v c=$ISO_CUT '$1>=c' app.log | grep -E 'level=ERROR|level=WARN' | sed 's/.*component=[^ ]* //' | cut -d' ' -f1 | sort | uniq -c | sort -rn
+  awk -v c=$SYS_CUT '$3>=c' thermal.log | grep -E 'ERROR|WARN' | sed 's/.*\\] //' | sort | uniq -c | sort -rn
+  awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c' dmesg.log | grep -E 'CRITICAL|WARNING'
 
-Deduplicate: if the same error repeats, report it once with the count and \
-time range. Example: "12x Inference deadline missed (14:56:35-14:56:39, \
-pipelines: camera-01, camera-02, camera-03)"."""
+STEP 3: For errors with count > 1, get first and last to find time range.
+  awk -v c=$ISO_CUT '$1>=c' app.log | grep 'error msg' | sed -n '1p;$p'
+
+Report: error type, count, time range, affected pipelines."""
 
 _log_agent = None
 
