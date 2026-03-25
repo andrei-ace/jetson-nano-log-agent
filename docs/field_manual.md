@@ -9,7 +9,7 @@ This procedure applies only when asked to investigate, check, or take action on 
 Follow these steps in order when investigating logs:
 
 1. **Search logs** — call `search_logs` with the requested time window. It handles timestamp parsing for all three log formats.
-2. **Look up every error** — for each distinct error found, call `consult_manual` with the log message to get root causes and recommended actions from this manual.
+2. **Look up errors** — group related errors into one query (e.g. thermal throttle + deep throttle + clock reduction are one incident). Call `consult_manual` once per group, not once per log line.
 3. **Escalate critical issues** — after looking up remediation, call `send_email` to ops-team@company.com for any Critical or High severity issues. Include the error details AND the recommended actions from the lookup in the email body.
 4. **Summarize** — present findings with evidence, root cause chain, and recommended actions.
 
