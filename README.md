@@ -2,6 +2,20 @@
 
 Autonomous log investigation agent for NVIDIA Jetson Orin Nano. Searches hardware and inference pipeline logs, diagnoses root causes using a RAG-powered field manual, and escalates critical issues via email — all running locally on a 4B parameter LLM.
 
+## Why Run Agents on Edge Devices
+
+A GPU thermal throttle at 2 AM doesn't wait for a cloud API to respond. When a Jetson running inference pipelines on a factory floor hits a thermal cascade, the device needs to shed load in seconds — not minutes. An agent running locally on the device can read the logs, diagnose the root cause, and act immediately.
+
+**No network dependency.** Edge devices operate in environments where connectivity is unreliable, metered, or restricted by policy. A surveillance system in a warehouse, a drone, or an offshore platform can't rely on cloud inference to reason about its own failures. The agent works identically whether the network is up or down.
+
+**Sensitive data stays on device.** Hardware logs contain thermal profiles, power rail voltages, inference pipeline configurations, and camera stream URLs — operational telemetry that reveals the physical topology and security posture of the deployment. Sending this to a cloud API for analysis is a data exfiltration risk. A local agent processes everything in a sandbox and only emits structured alerts.
+
+**Cost at scale.** A fleet of hundreds of Jetson devices, each generating logs every 5 seconds, would rack up significant API costs if every investigation required cloud LLM calls. A local 4B model running on hardware that's already deployed and powered has zero marginal cost per query.
+
+**Closed-loop autonomy.** The real value isn't just reading logs — it's acting on them. This agent follows a field manual to triage severity, looks up recommended actions, emails the ops team, and can reboot devices as a last resort. That closed loop only works reliably if it runs where the hardware is, without depending on external services that might be the reason things are failing in the first place.
+
+The trade-off is capability: a 4B model on a Jetson won't match a frontier model's reasoning. But for structured tasks with a well-defined procedure, a clear set of tools, and a domain-specific knowledge base — it's enough. The agent doesn't need to be creative. It needs to run `grep`, read the manual, and send an email.
+
 ## Why Nemotron-3 Nano 4B
 
 The Jetson Orin Nano has 8GB of unified memory shared between CPU and GPU. Running a language model locally on this budget means every megabyte of KV cache matters — a standard transformer with full attention would exhaust memory after a few thousand tokens of context, leaving nothing for the inference pipelines the device is actually meant to run.
