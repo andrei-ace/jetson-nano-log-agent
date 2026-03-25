@@ -53,23 +53,30 @@ Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 N
 
 **Main agent** follows an investigation procedure loaded from the field manual. It delegates log searching and manual lookups to specialized sub-agents, then decides whether to email ops or reboot.
 
-**Log search sub-agent** knows the three log formats (ISO timestamps, syslog, dmesg seconds-since-boot) and the correct shell commands to filter each. Given a time window, it runs the queries and returns raw error lines.
+**Log search sub-agent** knows the three log formats (ISO timestamps, syslog, dmesg seconds-since-boot) and the correct shell commands to filter each. Given a time window, it computes cutoffs, searches all files, and deduplicates repeated errors with counts and time ranges.
 
 **Manual consultant sub-agent** searches the knowledge base using two-stage retrieval: FAISS with dense embeddings (BAAI/bge-small-en-v1.5) for broad recall, then a cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2, 80MB) for precision. Returns severity, root causes, and recommended actions.
 
 ## Synthetic Log Scenario
 
-`gen_logs.py` generates 24 hours of realistic logs anchored to the current time. An incident is placed ~2 hours ago:
+`gen_logs.py` generates 24 hours of realistic logs anchored to the current time, with a boot sequence, two incidents, and background noise:
 
-1. A third inference pipeline (camera-03) starts, pushing GPU utilization to 95%
+**Boot sequence** — kernel init, GPU detection, NVMe identification, thermal daemon start, TensorRT engine loading, pipeline connections.
+
+**Incident 1 (~45 min ago):** GPU memory spike to 90%, CUDA unified memory thrashing with 340ms latency spike, self-resolved by TensorRT memory pool compaction.
+
+**Incident 2 (~30 min ago):** Thermal throttle cascade:
+1. Third pipeline (camera-03) starts, GPU utilization hits 95%
 2. Temperature rises rapidly — fan ramps to 100%
-3. GPU thermal throttle triggers at 70.5°C — clocks drop 918 → 624 MHz
+3. GPU thermal throttle at 70.5°C — clocks drop 918 → 624 MHz
 4. Inference deadline misses cascade across all three pipelines
-5. Deep throttle at 73°C — clocks drop further to 420 MHz
+5. Deep throttle at 73°C — clocks further to 420 MHz
 6. Inference queue fills (32/32) — pipeline stalls
 7. Load shedding: camera-03 suspended, TensorRT engine unloaded
 8. Recovery over 30 seconds — clocks restore, pipelines stabilize
 9. Camera-03 restarts after 60 seconds
+
+**Background noise** — scattered NVMe I/O errors, RTSP stream hiccups, GPU memory 85% warnings, NTP syncs.
 
 Three log files:
 
@@ -106,6 +113,8 @@ The `docs/` directory is the knowledge base — all Markdown files are chunked b
 | Pipeline Degraded Mode | High |
 | Pipeline Suspended — Load Shedding | Critical |
 | GPU Memory Warning | Medium |
+| OOM Killer — Process Terminated | Critical |
+| NVMe I/O Error — Storage Fault | High |
 | RTSP Stream Hiccup | Low |
 
 Updating any doc in `docs/` changes what the agent knows — no code changes needed. The FAISS index is rebuilt automatically when any doc changes.
@@ -202,7 +211,7 @@ Starts llama-server on port 8080 with all layers on GPU and 16K context.
 ./launch.sh
 ```
 
-This generates fresh logs, builds the FAISS index if needed (downloads embedding model + re-ranker on first run), and launches the agent inside a bubblewrap sandbox.
+This generates fresh logs, rebuilds the FAISS index if any doc changed, and launches the agent inside a bubblewrap sandbox.
 
 ```
 Jetson Log Agent ready. Type your question (or 'quit' to exit).
@@ -310,7 +319,7 @@ The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) s
 
 | Mount | Mode | Purpose |
 |-------|------|---------|
-| /usr, /bin, /lib, /etc, /sys | Read-only | System libraries and config |
+| /usr, /bin, /lib, /etc, /sys/devices/system/cpu | Read-only | System libraries, config, CPU info |
 | .venv, run_agent.py, demo_logs | Read-only | Agent code and log files |
 | kb_index/ | Read-only | FAISS index + embedding/re-ranker model cache |
 | output/ | Read-write | Action log (emails, reboots) |
@@ -342,7 +351,7 @@ Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully
 | Target | Run from | Description |
 |--------|----------|-------------|
 | `make deploy` | Dev machine | Rsync project to Jetson |
-| `make setup` | Dev machine | Deploy + swap + install + download model |
+| `make setup` | Either | Auto-detects Jetson; runs locally or deploys via SSH |
 | `make swap` | Jetson | Create 8G SSD swapfile (idempotent) |
 | `make install` | Jetson | Create venv, install Python deps |
 | `make download-models` | Jetson | Download all models (LLM GGUF + ONNX embedder + re-ranker) |
