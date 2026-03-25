@@ -52,7 +52,7 @@ check-deps:
 	@missing=""; \
 	command -v bwrap >/dev/null 2>&1 || missing="$$missing bubblewrap"; \
 	command -v socat >/dev/null 2>&1 || missing="$$missing socat"; \
-	test -x $(LLAMA_SERVER) || missing="$$missing llama.cpp"; \
+	{ test -x $(LLAMA_SERVER) || command -v llama-server >/dev/null 2>&1; } || missing="$$missing llama.cpp"; \
 	if [ -n "$$missing" ]; then \
 		echo "ERROR: Missing dependencies:$$missing"; \
 		echo "  sudo apt install bubblewrap socat"; \
@@ -92,8 +92,10 @@ hf-login:
 	uv pip install --python .venv/bin/python huggingface-hub
 	.venv/bin/python -c "from huggingface_hub import login; login()"
 
+LLAMA_CMD := $(shell test -x $(LLAMA_SERVER) && echo $(LLAMA_SERVER) || command -v llama-server 2>/dev/null)
+
 server: $(MODEL_DIR)/$(MODEL_NAME)
-	$(LLAMA_SERVER) \
+	$(LLAMA_CMD) \
 		--model $(MODEL_DIR)/$(MODEL_NAME) \
 		--port 8080 \
 		--n-gpu-layers -1 \
