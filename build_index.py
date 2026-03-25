@@ -3,14 +3,15 @@
 import json
 import os
 
-# Suppress C++ warnings from ONNX Runtime GPU discovery
-_fd = os.dup(2)
-os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
+_devnull = os.open(os.devnull, os.O_WRONLY)
+_saved = os.dup(2)
+os.dup2(_devnull, 2)
+os.close(_devnull)
 import onnxruntime as ort
 ort.set_default_logger_severity(3)
 from fastembed import TextEmbedding
-os.dup2(_fd, 2)
-os.close(_fd)
+os.dup2(_saved, 2)
+os.close(_saved)
 
 import faiss
 import numpy as np

@@ -93,6 +93,6 @@ swap:
 		sudo chmod 600 $(SWAP_FILE); \
 		sudo mkswap $(SWAP_FILE); \
 		sudo swapon $(SWAP_FILE); \
-		echo "$(SWAP_FILE) none swap sw 0 0" | sudo tee -a /etc/fstab > /dev/null; \
+		grep -q $(SWAP_FILE) /etc/fstab || echo "$(SWAP_FILE) none swap sw 0 0" | sudo tee -a /etc/fstab > /dev/null; \
 		echo "Swap enabled (persistent across reboots)"; \
 	fi

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-LangChain ReAct agent for investigating hardware and inference pipeline logs on a Jetson Orin Nano. Two-agent architecture: main investigator + manual consultant sub-agent. Connects to a local `llama-server` (`/opt/llama.cpp/build/bin`) running Nemotron-3 Nano 4B via `langchain-openai`. Agent process sandboxed with bubblewrap. Python managed with `uv`.
+LangChain ReAct agent for investigating hardware and inference pipeline logs on a Jetson Orin Nano. Three-agent architecture: main router + log search sub-agent + manual consultant sub-agent. Connects to a local `llama-server` (`/opt/llama.cpp/build/bin`) running Nemotron-3 Nano 4B via `langchain-openai`. Agent process sandboxed with bubblewrap. Python managed with `uv`.
 
 ## Build & Run
 

@@ -64,7 +64,7 @@ exec bwrap \
     --setenv PYTHONDONTWRITEBYTECODE "1" \
     --setenv LOG_DIR "/workspace/demo_logs" \
     --setenv KB_DIR "/workspace/kb_index" \
-    --setenv EMAIL_LOG "/workspace/output/sent_emails.log" \
+    --setenv ACTION_LOG "/workspace/output/actions.log" \
     --setenv OPENAI_BASE_URL "${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}" \
     --setenv OPENAI_API_KEY "${OPENAI_API_KEY:-not-needed}" \
     --setenv OPENAI_MODEL "${OPENAI_MODEL:-local-model}" \
