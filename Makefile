@@ -9,7 +9,7 @@ export PATH := .venv/bin:$(HOME)/.local/bin:$(PATH)
 SWAP_SIZE    := 8G
 SWAP_FILE    := /ssd/swapfile
 
-.PHONY: deploy setup install hf-login download-model server gen-logs build-index swap help
+.PHONY: deploy setup install check-deps hf-login download-model server gen-logs build-index swap help
 
 help:
 	@echo "From dev machine:"
@@ -43,10 +43,22 @@ setup: deploy
 
 # ── On Jetson ───────────────────────────────────────────────────────────────
 
-install:
+install: check-deps
 	@command -v uv >/dev/null 2>&1 || { echo "Installing uv 0.6.x..." && curl -LsSf https://astral.sh/uv/0.6/install.sh | sh; }
 	uv venv
 	uv pip install --python .venv/bin/python 'langchain-openai>=0.3,<1' 'langgraph>=0.2,<1' 'fastembed>=0.4,<1' 'faiss-cpu>=1.7,<2'
+
+check-deps:
+	@missing=""; \
+	command -v bwrap >/dev/null 2>&1 || missing="$$missing bubblewrap"; \
+	command -v socat >/dev/null 2>&1 || missing="$$missing socat"; \
+	test -x $(LLAMA_SERVER) || missing="$$missing llama.cpp"; \
+	if [ -n "$$missing" ]; then \
+		echo "ERROR: Missing dependencies:$$missing"; \
+		echo "  sudo apt install bubblewrap socat"; \
+		echo "  See https://github.com/ggerganov/llama.cpp for llama.cpp build instructions"; \
+		exit 1; \
+	fi
 
 HF_MODEL_REV := e0f60ca53a1e42e9a0e36e693690a3ab8a867c90
 HF_MODEL_URL := https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF/resolve/$(HF_MODEL_REV)/$(MODEL_NAME)

@@ -98,8 +98,21 @@ Updating the manual changes how the agent investigates — no code changes neede
 
 ## Setup
 
-### One-shot from dev machine
+### 1. Install system dependencies on Jetson
 
+```bash
+sudo apt install bubblewrap socat
+```
+
+Build llama.cpp (if not already at `/opt/llama.cpp/build/bin/`):
+```bash
+git clone https://github.com/ggerganov/llama.cpp /opt/llama.cpp
+cd /opt/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j$(nproc)
+```
+
+### 2. Deploy and set up the agent
+
+From the dev machine:
 ```bash
 git clone https://github.com/andrei-ace/jetson-nano-log-agent.git
 cd jetson-nano-log-agent
@@ -109,17 +122,18 @@ make setup
 ```
 
 This SSHs into the Jetson and:
-1. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
-2. Creates Python venv with uv
-3. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
-4. Downloads Nemotron-3 Nano 4B GGUF (~1.9 GB)
+1. Checks for bubblewrap, socat, and llama.cpp (fails early if missing)
+2. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
+3. Creates Python venv with uv
+4. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
+5. Downloads Nemotron-3 Nano 4B GGUF (~1.9 GB)
 
 ### Manual setup on Jetson
 
 ```bash
 cd /ssd/jetson-log-agent
 make swap             # 8G swapfile on SSD (idempotent, persistent)
-make install          # venv + deps
+make install          # venv + deps (checks for bubblewrap, socat, llama.cpp)
 make download-model   # Nemotron-3 Nano 4B GGUF
 ```
 
