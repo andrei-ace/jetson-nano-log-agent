@@ -213,52 +213,95 @@ You: any errors in the past 2 hours?
 ### Example session
 
 ```
-You: any errors past 2 hours?
+You: check last hour
 
-  [logs] last 2 hours
-    [logs] $ date -u '+%Y-%m-%dT%H:%M'
-    [logs] 2026-03-24T18:27
-    [logs] $ date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M'
-    [logs] 2026-03-24T16:27
-    [logs] $ awk -v cutoff=2026-03-24T16:27 '$1 >= cutoff' app.log | grep -E 'level=ERROR|level=WARN'
-    [logs] 2026-03-24T16:27:14Z level=ERROR component=thermal msg="GPU thermal throttle activated" ...
+  [logs] last hour
+    [logs] $ ISO_CUT=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M'); ...
+    [logs] ISO=2026-03-25T15:50 SYS=15:50:27 DMESG=86395.015000
+    [logs] $ awk -v c=2026-03-25T15:50 '$1>=c && /level=ERROR/' app.log
+    [logs] 2026-03-25T16:19:50 level=ERROR ... msg="GPU thermal throttle activated"
+    [logs] 2026-03-25T16:19:51 level=ERROR ... msg="Inference deadline missed" ...
     [logs] ...
-    [logs] $ grep -E 'ERROR|WARN' thermal.log
-    [logs] Mar 24 16:10:54 ERROR: GPU thermal throttle triggered: gpu=70.5C ...
+    [logs] $ awk -v c=15:50:27 '$3>=c && /ERROR|WARN/' thermal.log
+    [logs] Mar 25 16:19:45 ... WARN: Rapid temperature increase detected
+    [logs] Mar 25 16:19:50 ... ERROR: GPU thermal throttle triggered: gpu=70.5C
+    [logs] Mar 25 16:19:53 ... ERROR: GPU thermal throttle deepened: gpu=73.0C
     [logs] ...
-    [logs] $ grep -E 'CRITICAL|WARNING' dmesg.log
-    [logs] [82810.000000] tegra-thermal: CRITICAL: zone1(gpu) exceeded trip point 70000mC
-    [logs] ...
-  [manual] GPU thermal throttle triggered
-    [manual] search: GPU thermal throttle triggered
+    [logs] $ awk -F'[][]' -v c=86395.015000 '$2+0>=c && /CRITICAL|WARNING/' dmesg.log
+    [logs] [88210.000000] tegra-thermal: CRITICAL: zone1(gpu) exceeded trip point 70000mC
+    [logs] [88213.000000] tegra-thermal: CRITICAL: zone1(gpu) still above trip, deepening throttle
+    [logs] [88213.000000] nvgpu: gpu0: WARNING: severe clock reduction
+
+  [manual] thermal throttle GPU Jetson
     [manual] ## Thermal Throttle — GPU Over-Temperature
     [manual] **Severity:** Critical
+    [manual] **Recommended actions:**
+    [manual] 1. Physically inspect enclosure—remove dust from fan blades
+    [manual] 2. Verify ambient temperature; if >35°C, improve room cooling
+    [manual] 3. Reduce TensorRT max batch size from 4 to 2
     [manual] ...
-  [email] To: ops-team@company.com | CRITICAL: GPU Thermal Throttle on Jetson-07
 
-  [EMAIL SENT] To: ops-team@company.com | Subject: CRITICAL: GPU Thermal Throttle on Jetson-07
+  [email] To: ops-team@company.com | CRITICAL: GPU thermal throttle on jetson-07
 
-Critical GPU thermal throttle detected ~2h ago on jetson-07:
-- GPU reached 70.5°C, clocks reduced 918→624→420 MHz
-- Inference deadline misses across all pipelines
-- Camera-03 suspended via load shedding, recovered after 60s
+  [EMAIL SENT] To: ops-team@company.com | Subject: CRITICAL: GPU thermal throttle on jetson-07
 
-Recommended: inspect enclosure airflow, verify fan profile,
-lower TensorRT batch size. Email sent to ops.
+**Root Cause Chain:** Rapid temperature rise (+8.3°C/5s) → approaching throttle threshold
+(63.5°C) → thermal throttle triggered (70.5°C) → deepened (73.0°C) → inference deadline
+misses → pipeline stall → camera-03 suspended via load shedding.
+
+**Evidence:**
+- app.log: GPU thermal throttle, 12x inference deadline missed, pipeline stall, frame drops
+- thermal.log: Rapid temperature increase, fan at maximum, cooling capacity limited
+- dmesg.log: CRITICAL zone1(gpu) trip point exceeded, severe clock reduction
+
+**Recommended Actions (from field manual):**
+1. Physically inspect enclosure—remove dust from fan blades, ensure airflow unobstructed
+2. Verify ambient temperature; if >35°C, improve room cooling or relocate unit
+3. Reduce TensorRT max batch size from 4 to 2 (~40% GPU time reduction)
+4. Reapply thermal paste (Noctua NT-H1) on GPU heatsink contact
+5. Confirm fan profile set to `cool` via `sudo jetson_clocks --show`
+
+Email sent to ops-team@company.com. No reboot required — thermal cascade self-recovered.
 ```
 
 The agent:
-1. Delegates log searching to the log sub-agent (cyan `[logs]` prefix)
-2. Looks up each error in the field manual via the manual sub-agent (green `[manual]` prefix)
-3. Sends an email with error details and recommended actions (yellow `[email]`)
-4. Summarizes findings with evidence and root cause chain
+1. Delegates log searching to the log sub-agent (cyan `[logs]` prefix) — computes cutoffs for all three log formats, searches each file with time filtering, deduplicates
+2. Groups related errors (thermal throttle + deadline misses = one incident) and consults the field manual via the manual sub-agent (green `[manual]` prefix) — two-stage FAISS + cross-encoder re-ranking
+3. Sends an email with error details and recommended actions from the manual (yellow `[email]`)
+4. Summarizes with root cause chain, evidence from all three log files, and specific remediation steps
+5. Checks reboot policy — not needed since the thermal cascade self-recovered
 
 ### Viewing action log
 
 Emails and reboot commands are persisted to `output/actions.log`:
 
-```bash
-cat output/actions.log
+```
+$ cat output/actions.log
+============================================================
+Date: 2026-03-25T17:19:05Z
+From: jetson-log-agent@jetson-07
+To: ops-team@company.com
+Subject: CRITICAL: GPU Thermal Throttle and Pipeline Stall on Jetson Orin Nano
+============================================================
+CRITICAL ISSUE DETECTED: GPU thermal throttle has been triggered and
+deepened, with GPU temperature reaching 73.0°C. This is causing pipeline
+stall (camera-03 inference queue full) and RTSP stream disconnection.
+
+Key evidence:
+- app.log: GPU thermal throttle activated/deepened, pipeline stall,
+  RTSP stream disconnected, power budget exceeded, frame drops
+- thermal.log: Rapid temperature increase (+8.3°C/5s), throttle
+  triggered (70.5°C), deepened (73.0°C)
+- dmesg.log: CRITICAL: zone1(gpu) exceeded trip point 70000 mC
+
+Recommended actions (from manual):
+1. Physically inspect enclosure—remove dust, ensure airflow unobstructed.
+2. Verify ambient temperature; if >35°C, improve room cooling.
+3. Reduce TensorRT max batch size from 4 to 2 (~40% GPU time reduction).
+4. Reapply thermal paste (Noctua NT-H1) on GPU heatsink contact.
+5. Run `sudo jetson_clocks --show` to confirm fan profile is `cool`.
+
+This is a Critical severity issue requiring immediate attention.
 ```
 
 ## Sandbox
