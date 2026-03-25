@@ -89,6 +89,7 @@ Updating the manual changes how the agent investigates — no code changes neede
 - JetPack 6.x (Ubuntu 22.04, Python 3.10+)
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) built at `/opt/llama.cpp/build/bin/`
 - [bubblewrap](https://github.com/containers/bubblewrap) — `sudo apt install bubblewrap`
+- [socat](http://www.dest-unreach.org/socat/) — `sudo apt install socat` (network bridge for sandbox)
 - [uv](https://github.com/astral-sh/uv) — installed automatically by `make install`
 
 **Dev machine (for remote deployment):**
@@ -209,7 +210,7 @@ The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) s
 | output/ | Read-write | Action log (emails, reboots) |
 | /tmp | tmpfs | Ephemeral scratch space |
 
-Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is NOT isolated (agent needs localhost:8080 for the LLM server).
+Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully isolated (`--unshare-net`) — a socat bridge forwards only `127.0.0.1:8080` to the llama-server via a Unix socket. No other network access.
 
 ## Project Structure
 
