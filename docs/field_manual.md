@@ -258,6 +258,54 @@ GPU memory usage has reached 85% of total capacity (6.8 GB / 8.0 GB). Further al
 4. Monitor with `tegrastats` — watch the `GR3D` (GPU) and `RAM` fields; if RAM keeps growing between readings with no new pipelines, there's a leak in the inference wrapper
 5. If running yolov8s (22MB model), switch to yolov8n (6MB) — the engine memory footprint drops from ~350 MB to ~210 MB
 
+## OOM Killer — Process Terminated
+
+**Severity:** Critical
+
+The Linux OOM killer terminated a process because the system ran out of available memory. On the Jetson Orin Nano with 8GB shared between CPU and GPU, this typically means the combined memory usage of the LLM server, TensorRT engines, and the Python agent exceeded physical RAM plus swap.
+
+**Log signatures:**
+- dmesg.log: `Out of memory: Killed process XXXX (llama-server) total-vm:XXXXkB, anon-rss:XXXXkB`
+- dmesg.log: `oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),task=llama-server,pid=XXXX`
+- app.log: `level=ERROR component=supervisor msg="LLM server process exited unexpectedly" exit_code=-9`
+
+**Root causes:**
+- llama-server context window too large for available RAM (each token in the KV cache consumes memory)
+- Too many TensorRT engines loaded simultaneously alongside the LLM
+- Swap space insufficient or not configured — check with `swapon --show`
+- Memory leak in a long-running inference pipeline accumulating buffers
+
+**Recommended actions:**
+1. Check which process was killed: `dmesg | grep -i "killed process"` — if it's llama-server, reduce `--ctx-size` from 16384 to 8192
+2. Verify swap is active: `swapon --show` — if no swap, run `make swap` to create 8GB on SSD
+3. Check memory state at time of kill: `dmesg | grep -i "mem:"` for the OOM report showing free/used breakdown
+4. Reduce concurrent load: suspend a pipeline before restarting the killed process to free GPU memory
+5. Monitor with `tegrastats --interval 1000` and watch the `RAM` field — if it steadily climbs toward 8GB over hours, suspect a leak and identify the growing process with `ps aux --sort=-rss | head`
+
+## NVMe I/O Error — Storage Fault
+
+**Severity:** High
+
+An I/O error occurred on the NVMe SSD. Since the model weights, swap file, logs, and agent code all live on the SSD, storage faults can cascade into inference failures, OOM kills (swap unavailable), or data corruption.
+
+**Log signatures:**
+- dmesg.log: `nvme nvme0: I/O error, dev nvme0n1, sector XXXXX op 0x0:(READ) flags 0x0`
+- dmesg.log: `EXT4-fs error (device nvme0n1p1): ext4_find_entry: reading directory lblock 0`
+- app.log: `level=ERROR component=inference msg="Failed to load TensorRT engine" error="I/O error"`
+
+**Root causes:**
+- SSD wear — consumer NVMe drives in write-heavy workloads (continuous logging, frequent swap I/O) can wear out flash cells
+- Thermal throttling of the SSD itself — NVMe drives on Jetson can overheat when sandwiched against the SoC heatsink
+- Loose M.2 connector — vibration in industrial deployments can unseat the drive
+- Power loss during write — if the Jetson loses power without a clean shutdown, the filesystem journal may be corrupted
+
+**Recommended actions:**
+1. Check drive health: `sudo nvme smart-log /dev/nvme0n1` — look at `percentage_used` (>90% means the drive is near end of life) and `media_errors` (any non-zero value is bad)
+2. Check filesystem: `sudo dmesg | grep EXT4` — if you see `ext4_find_entry` or `ext4_lookup` errors, the filesystem is corrupted; schedule a `fsck` during maintenance
+3. Check SSD temperature: `sudo nvme smart-log /dev/nvme0n1 | grep temperature` — if >70°C, add a thermal pad between the drive and the carrier board
+4. If errors are intermittent, reseat the M.2 connector and check for oxidation on the contacts
+5. For production: use an industrial-grade NVMe (Samsung PM9A3 or similar with power-loss protection) and configure `ext4` with `data=journal` for full journaling
+
 ## RTSP Stream Hiccup
 
 **Severity:** Low

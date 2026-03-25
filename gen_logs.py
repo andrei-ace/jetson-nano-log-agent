@@ -11,10 +11,10 @@ OUT_DIR = os.environ.get("LOG_DIR", os.path.join(os.path.dirname(__file__), "dem
 # ---------------------------------------------------------------------------
 
 NOW = datetime.now(timezone.utc)
-# The incident happens ~2 hours ago; logs span 24h
 T_START = NOW - timedelta(hours=24)
-T_INCIDENT = NOW - timedelta(hours=2)
-BOOT_TIME = T_START - timedelta(seconds=3600)  # booted 1h before logs start
+T_MEMORY_SPIKE = NOW - timedelta(minutes=45)  # memory pressure builds
+T_INCIDENT = NOW - timedelta(minutes=30)       # thermal cascade follows
+BOOT_TIME = T_START - timedelta(seconds=3600)
 
 
 def iso(t: datetime) -> str:
@@ -374,9 +374,16 @@ def add_misc_events(t: datetime, app: list, thermal: list, dmesg: list):
         app.append(f"{iso(t)} level=WARN node=jetson-07 component=stream "
                    f'msg="RTSP stream hiccup" pipeline={cam} '
                    f"reconnect_ms={random.randint(200, 1500)}")
-    elif r < 0.05:
+    elif r < 0.045:
         # NTP sync
         dmesg.append(f"{dmesg_ts(t)} clocksource: Switched to clocksource arch_sys_counter")
+    elif r < 0.048:
+        # NVMe I/O warning (transient read error, corrected by retry)
+        sector = random.randint(100000, 9999999)
+        dmesg.append(f"{dmesg_ts(t)} nvme nvme0: I/O Cmd(0x02) error, "
+                     f"sc 0x002 sct 0x0, cdw10=0x{sector:08x}, cdw12=0x0007ff00")
+        dmesg.append(f"{dmesg_ts(t)} nvme nvme0: I/O error, dev nvme0n1, "
+                     f"sector {sector} op 0x0:(READ) flags 0x0 phys_seg 1 prio class 0")
 
 
 # ---------------------------------------------------------------------------
@@ -384,13 +391,99 @@ def add_misc_events(t: datetime, app: list, thermal: list, dmesg: list):
 # ---------------------------------------------------------------------------
 
 
+def generate_boot_sequence(t0: datetime, app: list, thermal: list, dmesg: list):
+    """Generate startup logs: kernel init, model loading, pipeline starts."""
+    t = t0
+
+    dmesg.append(f"{dmesg_ts(t)} tegra-pmc: Jetson Orin Nano (P3767-0005) power on, "
+                 f"rail=VDD_IN voltage=5000mV")
+    dmesg.append(f"{dmesg_ts(t)} nvgpu: gpu0: NVIDIA GA10B (Ampere), "
+                 f"1024 CUDA cores, 8192MB unified memory")
+    dmesg.append(f"{dmesg_ts(t)} nvgpu: gpu0: firmware loaded, gpcclk=918MHz max=1300MHz")
+    dmesg.append(f"{dmesg_ts(t)} nvme nvme0: Samsung 970 EVO Plus 250GB, "
+                 f"firmware 2B2QEXM7, LBA ns:0 nr_sectors:488397168")
+    dmesg.append(f"{dmesg_ts(t)} tegra-thermal: registered zones: "
+                 f"cpu, gpu, board, aux | trip=70000mC hyst=5000mC")
+
+    t += timedelta(seconds=2)
+    thermal.append(f"{syslog(t)} jetson-07 tegra-thermal [1201] INFO: "
+                   f"Daemon started, polling interval=5000ms")
+    thermal.append(f"{syslog(t)} jetson-07 tegra-thermal [1201] INFO: "
+                   f"Reading thermal zones: cpu=32.5C gpu=31.0C board=28.5C aux=26.0C")
+    thermal.append(f"{syslog(t)} jetson-07 tegra-thermal [1201] INFO: "
+                   f"Fan PWM duty=35% rpm=3450 target_temp=65.0C")
+
+    t += timedelta(seconds=3)
+    app.append(f"{iso(t)} level=INFO node=jetson-07 component=supervisor "
+               f'msg="Inference supervisor starting" version=2.4.1 pid=1823')
+    app.append(f"{iso(t + timedelta(milliseconds=50))} level=INFO node=jetson-07 "
+               f'component=supervisor msg="Loading pipeline config" '
+               f"path=/etc/jetson-agent/pipelines.yaml pipelines=2")
+
+    t += timedelta(seconds=1)
+    for i, pipe in enumerate(["camera-01", "camera-02"]):
+        tt = t + timedelta(seconds=i * 3)
+        stream = f"rtsp://192.168.1.{50 + i}/cam{i + 1}"
+        app.append(f"{iso(tt)} level=INFO node=jetson-07 component=scheduler "
+                   f'msg="Pipeline {pipe} starting" model=yolov8n stream={stream}')
+        app.append(f"{iso(tt + timedelta(milliseconds=20))} level=INFO node=jetson-07 "
+                   f'component=inference msg="Loading TensorRT engine for pipeline {pipe}" '
+                   f"engine=/models/yolov8n.engine")
+        app.append(f"{iso(tt + timedelta(milliseconds=600))} level=INFO node=jetson-07 "
+                   f'component=inference msg="TensorRT engine loaded" '
+                   f"pipeline={pipe} load_time_ms={550 + random.randint(0, 80)} device_memory_mb=210")
+        app.append(f"{iso(tt + timedelta(seconds=1))} level=INFO node=jetson-07 "
+                   f'component=stream msg="RTSP stream connected" '
+                   f"pipeline={pipe} stream={stream}")
+
+        dmesg.append(f"{dmesg_ts(tt)} nvgpu: gpu0: new context allocated: "
+                     f"pid={1830 + i} comm=trt_inference size=214958080B")
+
+    t += timedelta(seconds=8)
+    app.append(f"{iso(t)} level=INFO node=jetson-07 component=supervisor "
+               f'msg="All pipelines online" active=2 standby=0')
+    dmesg.append(f"{dmesg_ts(t)} nvgpu: gpu0: memory: "
+                 f"used=2621440KB/8388608KB (31.3%)")
+
+
+def generate_memory_spike(t0: datetime, app: list, thermal: list, dmesg: list):
+    """Minor incident: GPU memory spikes to 90%, self-resolves after GC."""
+    t = t0
+
+    app.append(f"{iso(t)} level=WARN node=jetson-07 component=metrics "
+               f'"GPU memory_used=7.2/8.0GB (90%) -- approaching limit"')
+    dmesg.append(f"{dmesg_ts(t)} nvgpu: gpu0: memory: "
+                 f"used=7340032KB/8388608KB (87.5%) -- high watermark")
+    app.append(f"{iso(t + timedelta(seconds=1))} level=WARN node=jetson-07 "
+               f'component=inference msg="CUDA unified memory migration detected" '
+               f"pages_migrated=1847 direction=gpu_to_cpu latency_spike_ms=340")
+    app.append(f"{iso(t + timedelta(seconds=1, milliseconds=200))} level=WARN "
+               f"node=jetson-07 component=inference "
+               f'msg="Inference latency increasing" pipeline=camera-02 '
+               f"batch_id=B-{random.randint(50000, 59999)} frames=4 "
+               f"latency_ms=285 fps=14.0 expected_max_ms=40")
+
+    app.append(f"{iso(t + timedelta(seconds=5))} level=INFO node=jetson-07 "
+               f'component=inference msg="TensorRT memory pool compacted" '
+               f"freed_mb=380 trigger=high_watermark")
+    dmesg.append(f"{dmesg_ts(t + timedelta(seconds=5))} nvgpu: gpu0: memory: "
+                 f"used=5242880KB/8388608KB (62.5%) -- after compaction")
+
+    app.append(f"{iso(t + timedelta(seconds=8))} level=INFO node=jetson-07 "
+               f'component=metrics "GPU memory_used=5.0/8.0GB (62%) -- recovered"')
+
+
 def generate():
     app_lines = []
     thermal_lines = []
     dmesg_lines = []
 
-    t = T_START
+    # Boot sequence at T_START
+    generate_boot_sequence(T_START, app_lines, thermal_lines, dmesg_lines)
+
+    t = T_START + timedelta(seconds=20)  # skip past boot
     incident_done = False
+    memory_spike_done = False
 
     while t < NOW:
         # Normal ticks every 5s
@@ -399,7 +492,14 @@ def generate():
         normal_dmesg_tick(t, dmesg_lines)
         add_misc_events(t, app_lines, thermal_lines, dmesg_lines)
 
-        # Incident window
+        # Memory spike (minor, self-resolving)
+        if not memory_spike_done and t >= T_MEMORY_SPIKE:
+            generate_memory_spike(t, app_lines, thermal_lines, dmesg_lines)
+            memory_spike_done = True
+            t += timedelta(seconds=15)
+            continue
+
+        # Thermal throttle cascade (major incident)
         if not incident_done and t >= T_INCIDENT:
             generate_incident(t, app_lines, thermal_lines, dmesg_lines)
             incident_done = True

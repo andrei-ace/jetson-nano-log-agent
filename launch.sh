@@ -16,11 +16,19 @@ uv pip install --python "$SCRIPT_DIR/.venv/bin/python" 'langchain-openai>=0.3,<1
 echo "Generating logs..."
 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/gen_logs.py"
 
-# ── Build RAG index (skip if already built and field manual unchanged) ────────
+# ── Build RAG index (skip if already built and docs unchanged) ────────────────
 INDEX_DIR="$SCRIPT_DIR/kb_index"
-if [[ ! -f "$INDEX_DIR/index.faiss" ]] || [[ "$SCRIPT_DIR/field_manual.md" -nt "$INDEX_DIR/index.faiss" ]]; then
-    echo "Building field manual index..."
-    "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/build_index.py"
+DOCS_CHANGED=false
+if [[ ! -f "$INDEX_DIR/index.faiss" ]]; then
+    DOCS_CHANGED=true
+else
+    for doc in "$SCRIPT_DIR/docs/"*.md; do
+        [[ "$doc" -nt "$INDEX_DIR/index.faiss" ]] && DOCS_CHANGED=true && break
+    done
+fi
+if $DOCS_CHANGED; then
+    echo "Building knowledge base index..."
+    DOCS_DIR="$SCRIPT_DIR/docs" "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/build_index.py"
 fi
 
 # ── Ensure output dir exists ───────────────────────────────────────────────

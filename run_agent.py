@@ -72,13 +72,17 @@ def shell(command: str) -> str:
 # --- RAG ---
 
 class KnowledgeBase:
-    """FAISS index + chunks + embedding model for the field manual."""
+    """FAISS index + embeddings + cross-encoder re-ranker for the field manual."""
+
+    EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+    RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 
     def __init__(self, kb_dir: str):
         self._dir = kb_dir
         self._index = None
         self._chunks: list[tuple[str, str]] | None = None
-        self._model = None
+        self._embedder = None
+        self._reranker = None
 
     def _load(self):
         if self._index is not None:
@@ -88,17 +92,20 @@ class KnowledgeBase:
         with open(os.path.join(self._dir, "chunks.json")) as f:
             self._chunks = json.load(f)
 
-    def _load_model(self):
-        if self._model is not None:
+    def _load_models(self):
+        if self._embedder is not None:
             return
         with _suppress_onnx_warnings():
             import onnxruntime as ort
             ort.set_default_logger_severity(3)
             from fastembed import TextEmbedding
-        self._model = TextEmbedding(
-            model_name="BAAI/bge-small-en-v1.5",
-            cache_dir=os.path.join(self._dir, "model_cache"),
-            local_files_only=True,
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+        cache = os.path.join(self._dir, "model_cache")
+        self._embedder = TextEmbedding(
+            model_name=self.EMBED_MODEL, cache_dir=cache, local_files_only=True,
+        )
+        self._reranker = TextCrossEncoder(
+            model_name=self.RERANK_MODEL, cache_dir=cache, local_files_only=True,
         )
 
     @property
@@ -111,13 +118,22 @@ class KnowledgeBase:
         import numpy as np
 
         self._load()
-        self._load_model()
-        query_emb = np.array(list(self._model.embed([query])), dtype=np.float32)
-        faiss.normalize_L2(query_emb)
+        self._load_models()
 
-        k = min(k, len(self._chunks))
-        scores, indices = self._index.search(query_emb, k)
-        return [self._chunks[idx] for idx in indices[0]]
+        # Stage 1: FAISS retrieves broad candidates
+        query_emb = np.array(list(self._embedder.embed([query])), dtype=np.float32)
+        faiss.normalize_L2(query_emb)
+        n_candidates = min(k * 2, len(self._chunks))
+        _, indices = self._index.search(query_emb, n_candidates)
+
+        candidates = [self._chunks[idx] for idx in indices[0]]
+        docs = [f"{heading}\n{body}" for heading, body in candidates]
+
+        # Stage 2: cross-encoder re-ranks for precision
+        scores = list(self._reranker.rerank(query, docs))
+        ranked = sorted(zip(scores, candidates), reverse=True)
+
+        return [chunk for _, chunk in ranked[:k]]
 
 
 _kb = KnowledgeBase(KB_DIR)
@@ -248,26 +264,21 @@ def _run_subagent(agent, label: str, color: str, user_msg: str,
 
 
 LOG_SEARCH_PROMPT = """\
-You search Jetson Orin Nano log files for errors using shell commands.
+Search Jetson log files for errors using shell commands.
 
-STEP 1: Get current UTC time.
-  date -u '+%Y-%m-%dT%H:%M'
+Compute cutoffs, then search all three files:
+  ISO_CUT=$(date -u -d 'N hours ago' '+%%Y-%%m-%%dT%%H:%%M')
+  SYS_CUT=$(date -u -d 'N hours ago' '+%%H:%%M:%%S')
+  DMESG_LAST=$(tail -1 dmesg.log | sed 's/\\[\\([0-9.]*\\)\\].*/\\1/')
+  DMESG_CUT=$(echo "$DMESG_LAST - SECONDS" | bc)
 
-STEP 2: Compute the ISO cutoff by subtracting the requested window from current time.
-  date -u -d 'N minutes ago' '+%Y-%m-%dT%H:%M'
-  date -u -d 'N hours ago' '+%Y-%m-%dT%H:%M'
+  echo "=== app.log ===" && awk -v c=$ISO_CUT '$1>=c' app.log | grep -E 'level=ERROR|level=WARN'
+  echo "=== thermal.log ===" && awk -v c=$SYS_CUT '$3>=c' thermal.log | grep -E 'ERROR|WARN'
+  echo "=== dmesg.log ===" && awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c' dmesg.log | grep -E 'CRITICAL|WARNING'
 
-STEP 3: Search app.log (ISO timestamps, first field). Levels are level=ERROR, level=WARN.
-  awk -v cutoff=CUTOFF '$1 >= cutoff' app.log | grep -E 'level=ERROR|level=WARN'
-
-STEP 4: Search thermal.log (syslog timestamps, cannot filter by time).
-  grep -E 'ERROR|WARN' thermal.log
-
-STEP 5: Search dmesg.log (seconds-since-boot, cannot filter by time).
-  grep -E 'CRITICAL|WARNING' dmesg.log
-
-Do NOT reason about quoting or syntax. Just run the commands above, substituting \
-the cutoff value you computed. Return the output grouped by file."""
+Deduplicate: if the same error repeats, report it once with the count and \
+time range. Example: "12x Inference deadline missed (14:56:35-14:56:39, \
+pipelines: camera-01, camera-02, camera-03)"."""
 
 _log_agent = None
 

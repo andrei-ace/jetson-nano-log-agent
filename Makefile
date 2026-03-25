@@ -109,7 +109,7 @@ gen-logs:
 	python gen_logs.py
 
 build-index:
-	python build_index.py
+	DOCS_DIR=./docs python build_index.py
 
 swap:
 	@if swapon --show | grep -q $(SWAP_FILE); then \
