@@ -2,6 +2,16 @@
 
 Autonomous log investigation agent for NVIDIA Jetson Orin Nano. Searches hardware and inference pipeline logs, diagnoses root causes using a RAG-powered field manual, and escalates critical issues via email — all running locally on a 4B parameter LLM.
 
+## Why Nemotron-3 Nano 4B
+
+The Jetson Orin Nano has 8GB of unified memory shared between CPU and GPU. Running a language model locally on this budget means every megabyte of KV cache matters — a standard transformer with full attention would exhaust memory after a few thousand tokens of context, leaving nothing for the inference pipelines the device is actually meant to run.
+
+Nemotron-3 Nano 4B is a hybrid architecture that interleaves transformer attention layers with Mamba2 (selective state space) layers. Mamba2 layers process sequences in constant memory — they maintain a fixed-size hidden state rather than caching every past token's key-value pairs. Only the attention layers need a KV cache, and there are far fewer of them in the hybrid design.
+
+The practical effect: Nemotron-3 Nano can run with a 16K context window on the Orin Nano while consuming a fraction of the KV cache memory that a pure transformer of the same size would need. This leaves enough headroom for the embedding model (fastembed/bge-small-en-v1.5), the FAISS index, and the Python agent runtime — all sharing that same 8GB.
+
+The Q4_K_M quantization (4-bit, ~2.8 GB on disk) further reduces the memory footprint while preserving enough quality for the structured reasoning this agent needs: parsing log timestamps, following a step-by-step procedure, and formatting email reports.
+
 ## Architecture
 
 Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 Nano 4B):
@@ -110,14 +120,24 @@ git clone https://github.com/ggerganov/llama.cpp /opt/llama.cpp
 cd /opt/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j$(nproc)
 ```
 
-### 2. Deploy and set up the agent
+### 2. Configure and deploy from dev machine
 
-From the dev machine:
+The Makefile uses SSH and rsync to deploy code to the Jetson. Edit the top of the `Makefile` to match your setup:
+
+```makefile
+REMOTE       := andrei@jetson-nano.local   # SSH user@host for your Jetson
+REMOTE_DIR   := /ssd/jetson-log-agent      # Project path on Jetson
+MODEL_DIR    := /ssd/jetson-log-agent/models
+LLAMA_SERVER := /opt/llama.cpp/build/bin/llama-server  # Path to llama-server binary
+SWAP_FILE    := /ssd/swapfile              # Where to create swap
+```
+
+Then deploy:
 ```bash
 git clone https://github.com/andrei-ace/jetson-nano-log-agent.git
 cd jetson-nano-log-agent
 
-# Edit REMOTE in Makefile if your Jetson hostname differs
+# Edit the variables above in Makefile
 make setup
 ```
 
@@ -126,7 +146,7 @@ This SSHs into the Jetson and:
 2. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
 3. Creates Python venv with uv
 4. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
-5. Downloads Nemotron-3 Nano 4B GGUF (~1.9 GB)
+5. Downloads Nemotron-3 Nano 4B GGUF (~2.8 GB)
 
 ### Manual setup on Jetson
 
@@ -249,7 +269,7 @@ Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully
 | `make setup` | Dev machine | Deploy + swap + install + download model |
 | `make swap` | Jetson | Create 8G SSD swapfile (idempotent) |
 | `make install` | Jetson | Create venv, install Python deps |
-| `make download-model` | Jetson | Download Nemotron-3 Nano 4B GGUF (~1.9 GB) |
+| `make download-model` | Jetson | Download Nemotron-3 Nano 4B GGUF (~2.8 GB) |
 | `make hf-login` | Jetson | Authenticate with HuggingFace (faster downloads) |
 | `make server` | Jetson | Start llama-server on port 8080 |
 | `make gen-logs` | Jetson | Regenerate logs with current timestamps |
