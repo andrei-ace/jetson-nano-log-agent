@@ -266,17 +266,15 @@ def _run_subagent(agent, label: str, color: str, user_msg: str,
 LOG_SEARCH_PROMPT = """\
 Search Jetson log files for errors using shell commands.
 
-STEP 1: Compute cutoffs.
-  ISO_CUT=$(date -u -d 'N hours ago' '+%Y-%m-%dT%H:%M')
-  SYS_CUT=$(date -u -d 'N hours ago' '+%H:%M:%S')
-  DMESG_LAST=$(tail -1 dmesg.log | sed 's/\\[\\([0-9.]*\\)\\].*/\\1/')
-  DMESG_CUT=$(echo "$DMESG_LAST - SECONDS" | bc)
+STEP 1: Compute all cutoffs in one command.
+  ISO_CUT=$(date -u -d 'N hours ago' '+%Y-%m-%dT%H:%M'); SYS_CUT=$(date -u -d 'N hours ago' '+%H:%M:%S'); DMESG_LAST=$(tail -1 dmesg.log | sed 's/\\[\\([0-9.]*\\)\\].*/\\1/'); DMESG_CUT=$(echo "$DMESG_LAST - N * 3600" | bc); echo "ISO=$ISO_CUT SYS=$SYS_CUT DMESG=$DMESG_CUT"
+  Replace N with the number of hours. For minutes use 'N minutes ago' and N * 60.
 
-STEP 2: Search each file (one command per file).
-  awk -v c=$ISO_CUT '$1>=c && /level=ERROR/' app.log
-  awk -v c=$ISO_CUT '$1>=c && /level=WARN/' app.log
-  awk -v c=$SYS_CUT '$3>=c && /ERROR|WARN/' thermal.log
-  awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c && /CRITICAL|WARNING/' dmesg.log
+STEP 2: Search each file (one command per file, substitute the cutoff values).
+  awk -v c=ISO_CUT '$1>=c && /level=ERROR/' app.log
+  awk -v c=ISO_CUT '$1>=c && /level=WARN/' app.log
+  awk -v c=SYS_CUT '$3>=c && /ERROR|WARN/' thermal.log
+  awk -F'[][]' -v c=DMESG_CUT '$2+0>=c && /CRITICAL|WARNING/' dmesg.log
 
 Deduplicate: if the same error repeats, report it once with the count \
 and time range."""

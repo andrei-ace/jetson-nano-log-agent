@@ -9,22 +9,28 @@ export PATH := .venv/bin:$(HOME)/.local/bin:$(PATH)
 SWAP_SIZE    := 8G
 SWAP_FILE    := /ssd/swapfile
 
-.PHONY: deploy setup install check-deps hf-login download-model server gen-logs build-index swap help
+.PHONY: deploy setup install check-deps hf-login download-model download-models download-onnx-models server gen-logs build-index swap help
+
+IS_JETSON := $(shell test -f /etc/nv_tegra_release && echo 1 || echo 0)
 
 help:
-	@echo "From dev machine:"
-	@echo "  make deploy         - Rsync project to Jetson"
-	@echo "  make setup          - Deploy + install + download model on Jetson"
-	@echo ""
-	@echo "On Jetson (cd /ssd/jetson-log-agent):"
-	@echo "  make swap           - Create 8G swap on SSD (idempotent)"
+	@echo "  make setup          - Full setup (auto-detects Jetson vs dev machine)"
+	@echo "  make deploy         - Rsync project to Jetson (from dev machine)"
 	@echo "  make install        - Create venv and install deps"
-	@echo "  make download-model - Download Nemotron-3 Nano 4B GGUF"
-	@echo "  make server         - Start llama-server (auto-downloads model)"
+	@echo "  make download-models - Download LLM GGUF + ONNX embedding/re-ranker"
+	@echo "  make server         - Start llama-server"
 	@echo "  make gen-logs       - Regenerate logs anchored to current time"
 	@echo "  ./launch.sh         - Gen logs + run agent in bwrap sandbox"
 
-# ── Dev machine ─────────────────────────────────────────────────────────────
+# ── Setup (auto-detects Jetson) ────────────────────────────────────────────
+
+ifeq ($(IS_JETSON),1)
+setup: swap install download-models build-index
+	@echo "Setup complete. Run 'make server' then './launch.sh'"
+else
+setup: deploy
+	ssh $(REMOTE) 'cd $(REMOTE_DIR) && make setup'
+endif
 
 deploy:
 	ssh $(REMOTE) "mkdir -p $(REMOTE_DIR)"
@@ -37,9 +43,6 @@ deploy:
 		--exclude 'kb_index/' \
 		--exclude 'output/' \
 		./ $(REMOTE):$(REMOTE_DIR)/
-
-setup: deploy
-	ssh $(REMOTE) 'cd $(REMOTE_DIR) && make swap && make install && make download-model'
 
 # ── On Jetson ───────────────────────────────────────────────────────────────
 
@@ -87,6 +90,11 @@ download-model:
 		echo "NOTE: Set MODEL_SHA256 in Makefile to enable integrity check."; \
 		echo "  sha256sum $(MODEL_DIR)/$(MODEL_NAME)"; \
 	fi
+
+download-models: download-model download-onnx-models
+
+download-onnx-models:
+	python build_index.py --models-only
 
 hf-login:
 	uv pip install --python .venv/bin/python huggingface-hub

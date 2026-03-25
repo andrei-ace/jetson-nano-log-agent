@@ -43,11 +43,11 @@ Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 N
 | Sub-Agent          | | Sub-Agent                 |
 |                    | |                           |
 | Tool: shell        | | Tool: search_manual       |
-| (grep, awk, date)  | | (FAISS + embeddings)      |
+| (grep, awk, date)  | | (FAISS + re-ranker)       |
 +--------+-----------+ +---------+-----------------+
          |                       |
-    demo_logs/             field_manual.md
- app.log thermal.log      (12 incident sections)
+    demo_logs/                docs/
+ app.log thermal.log     (4 docs, 30+ sections)
    dmesg.log
 ```
 
@@ -55,7 +55,7 @@ Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 N
 
 **Log search sub-agent** knows the three log formats (ISO timestamps, syslog, dmesg seconds-since-boot) and the correct shell commands to filter each. Given a time window, it runs the queries and returns raw error lines.
 
-**Manual consultant sub-agent** searches a FAISS-indexed field manual using dense embeddings (BAAI/bge-small-en-v1.5 via fastembed). Returns severity, root causes, and recommended actions for each error.
+**Manual consultant sub-agent** searches the knowledge base using two-stage retrieval: FAISS with dense embeddings (BAAI/bge-small-en-v1.5) for broad recall, then a cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2, 80MB) for precision. Returns severity, root causes, and recommended actions.
 
 ## Synthetic Log Scenario
 
@@ -81,10 +81,17 @@ Three log files:
 
 ## Field Manual
 
-`field_manual.md` is the single source of truth for agent behavior. It contains:
+The `docs/` directory is the knowledge base — all Markdown files are chunked by `##` headings, embedded, and indexed with FAISS. A cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2) improves retrieval precision at query time.
+
+**`field_manual.md`** is the primary source. It contains:
 
 - **Investigation Procedure** — the workflow the agent follows (search logs → look up errors → escalate → summarize)
-- **12 incident sections** — each with severity, log signatures, root causes, and recommended actions
+- **14 incident sections** — each with severity, log signatures, root causes, and recommended actions
+
+**Additional docs:**
+- **`hardware_spec.md`** — Orin Nano specs, thermal envelope, memory budget, power rails, NVPMODEL profiles
+- **`deployment_guide.md`** — provisioning, systemd services, pipeline config, monitoring, decommissioning
+- **`known_issues.md`** — 6 documented platform quirks with workarounds (nvgpu driver hang, TensorRT memory leak, CUDA thrashing, etc.)
 
 | Section | Severity |
 |---------|----------|
@@ -101,7 +108,7 @@ Three log files:
 | GPU Memory Warning | Medium |
 | RTSP Stream Hiccup | Low |
 
-Updating the manual changes how the agent investigates — no code changes needed. The FAISS index is rebuilt automatically when the manual changes.
+Updating any doc in `docs/` changes what the agent knows — no code changes needed. The FAISS index is rebuilt automatically when any doc changes.
 
 ## Prerequisites
 
@@ -134,41 +141,49 @@ git clone https://github.com/ggerganov/llama.cpp /opt/llama.cpp
 cd /opt/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j$(nproc)
 ```
 
-### 2. Configure and deploy from dev machine
+### 2. Set up the agent
 
-The Makefile uses SSH and rsync to deploy code to the Jetson. Edit the top of the `Makefile` to match your setup:
+`make setup` auto-detects whether you're on the Jetson or a dev machine:
 
-```makefile
-REMOTE       := andrei@jetson-nano.local   # SSH user@host for your Jetson
-REMOTE_DIR   := /ssd/jetson-log-agent      # Project path on Jetson
-MODEL_DIR    := /ssd/jetson-log-agent/models
-LLAMA_SERVER := /opt/llama.cpp/build/bin/llama-server  # Path to llama-server binary
-SWAP_FILE    := /ssd/swapfile              # Where to create swap
+**On the Jetson directly:**
+```bash
+git clone https://github.com/andrei-ace/jetson-nano-log-agent.git
+cd jetson-nano-log-agent
+make setup
 ```
 
-Then deploy:
+This creates swap, installs deps, and downloads the model — all locally.
+
+**From a dev machine (deploys via SSH):**
 ```bash
 git clone https://github.com/andrei-ace/jetson-nano-log-agent.git
 cd jetson-nano-log-agent
 
-# Edit the variables above in Makefile
+# Edit the top of Makefile to match your setup:
+#   REMOTE       := user@jetson-hostname
+#   REMOTE_DIR   := /ssd/jetson-log-agent
+#   LLAMA_SERVER := /path/to/llama-server
 make setup
 ```
 
-This SSHs into the Jetson and:
+This rsyncs the code to the Jetson, then runs `make setup` there via SSH.
+
+Either way, setup:
 1. Checks for bubblewrap, socat, and llama.cpp (fails early if missing)
 2. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
 3. Creates Python venv with uv
 4. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
 5. Downloads Nemotron-3 Nano 4B GGUF (~2.8 GB)
+6. Builds FAISS index from `docs/` (downloads embedding model + re-ranker on first run, ~130 MB total)
 
-### Manual setup on Jetson
+### Manual setup (step by step)
 
 ```bash
 cd /ssd/jetson-log-agent
 make swap             # 8G swapfile on SSD (idempotent, persistent)
 make install          # venv + deps (checks for bubblewrap, socat, llama.cpp)
-make download-model   # Nemotron-3 Nano 4B GGUF
+make download-models  # All models: LLM GGUF + ONNX embedder + re-ranker
+make build-index      # FAISS index from docs/
 ```
 
 ## Running
@@ -187,7 +202,7 @@ Starts llama-server on port 8080 with all layers on GPU and 16K context.
 ./launch.sh
 ```
 
-This generates fresh logs, builds the FAISS index if needed, and launches the agent inside a bubblewrap sandbox.
+This generates fresh logs, builds the FAISS index if needed (downloads embedding model + re-ranker on first run), and launches the agent inside a bubblewrap sandbox.
 
 ```
 Jetson Log Agent ready. Type your question (or 'quit' to exit).
@@ -254,7 +269,7 @@ The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) s
 |-------|------|---------|
 | /usr, /bin, /lib, /etc, /sys | Read-only | System libraries and config |
 | .venv, run_agent.py, demo_logs | Read-only | Agent code and log files |
-| kb_index/ | Read-write | FAISS index + embedding model cache |
+| kb_index/ | Read-only | FAISS index + embedding/re-ranker model cache |
 | output/ | Read-write | Action log (emails, reboots) |
 | /tmp | tmpfs | Ephemeral scratch space |
 
@@ -264,9 +279,13 @@ Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully
 
 ```
 ├── run_agent.py        # Three-agent system (main router + 2 sub-agents)
-├── build_index.py      # Offline FAISS index builder
-├── gen_logs.py         # Synthetic log generator (24h + thermal incident)
-├── field_manual.md     # Incident runbook (12 sections, RAG source of truth)
+├── build_index.py      # FAISS index builder + model downloader
+├── gen_logs.py         # Synthetic log generator (24h, 2 incidents)
+├── docs/               # Knowledge base (4 markdown docs, chunked for RAG)
+│   ├── field_manual.md       # Incident runbook (14 sections)
+│   ├── hardware_spec.md      # Orin Nano specs and limits
+│   ├── deployment_guide.md   # Provisioning and operations
+│   └── known_issues.md       # Platform quirks and workarounds
 ├── launch.sh           # Log gen + index build + bwrap sandbox launcher
 ├── Makefile            # Deploy, install, server, swap targets
 ├── pyproject.toml      # Python dependencies
@@ -283,11 +302,11 @@ Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully
 | `make setup` | Dev machine | Deploy + swap + install + download model |
 | `make swap` | Jetson | Create 8G SSD swapfile (idempotent) |
 | `make install` | Jetson | Create venv, install Python deps |
-| `make download-model` | Jetson | Download Nemotron-3 Nano 4B GGUF (~2.8 GB) |
+| `make download-models` | Jetson | Download all models (LLM GGUF + ONNX embedder + re-ranker) |
 | `make hf-login` | Jetson | Authenticate with HuggingFace (faster downloads) |
 | `make server` | Jetson | Start llama-server on port 8080 |
 | `make gen-logs` | Jetson | Regenerate logs with current timestamps |
-| `make build-index` | Jetson | Rebuild FAISS index from field manual |
+| `make build-index` | Jetson | Rebuild FAISS index from docs/ |
 
 ## Environment Variables
 

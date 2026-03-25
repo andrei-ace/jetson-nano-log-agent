@@ -63,14 +63,10 @@ def main():
     texts = [f"{heading}\n{body}" for heading, body in all_chunks]
 
     os.makedirs(MODEL_CACHE, exist_ok=True)
-    cached = any(
-        f.endswith(".onnx")
-        for root, _, files in os.walk(MODEL_CACHE)
-        for f in files
-    )
-    print(f"Embedding with {EMBED_MODEL}..." + (" (cached)" if cached else " (downloading)"))
-    model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=MODEL_CACHE, local_files_only=cached)
-    embeddings = np.array(list(model.embed(texts)), dtype=np.float32)
+    embed_model = ensure_models()
+
+    print("Embedding...")
+    embeddings = np.array(list(embed_model.embed(texts)), dtype=np.float32)
     faiss.normalize_L2(embeddings)
 
     index = faiss.IndexFlatIP(embeddings.shape[1])
@@ -85,19 +81,39 @@ def main():
     print(f"Wrote {OUT_DIR}/index.faiss ({embeddings.shape[0]} vectors, dim={embeddings.shape[1]})")
     print(f"Wrote {OUT_DIR}/chunks.json ({len(all_chunks)} chunks)")
 
-    # Ensure re-ranker model is cached for runtime use
-    rerank_cached = any(
-        f.endswith(".onnx")
-        for root, _, files in os.walk(MODEL_CACHE)
-        for f in files
-        if "marco" in root.lower() or "rerank" in root.lower()
-    )
-    if not rerank_cached:
-        print(f"Downloading re-ranker {RERANK_MODEL}...")
-        TextCrossEncoder(model_name=RERANK_MODEL, cache_dir=MODEL_CACHE)
-    else:
-        print(f"Re-ranker {RERANK_MODEL} (cached)")
+
+def _is_cached(subdir_match: str = "") -> bool:
+    """Check if any .onnx file exists in MODEL_CACHE (optionally matching subdir name)."""
+    if not os.path.isdir(MODEL_CACHE):
+        return False
+    for root, _, files in os.walk(MODEL_CACHE):
+        if subdir_match and subdir_match not in root.lower():
+            continue
+        if any(f.endswith(".onnx") for f in files):
+            return True
+    return False
+
+
+def ensure_models():
+    """Download embedding + re-ranker models if not cached. Returns embed model."""
+    os.makedirs(MODEL_CACHE, exist_ok=True)
+
+    embed_cached = _is_cached("bge")
+    print(f"Embedder {EMBED_MODEL}: " + ("cached" if embed_cached else "downloading..."))
+    embed_model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=MODEL_CACHE,
+                                local_files_only=embed_cached)
+
+    rerank_cached = _is_cached("marco")
+    print(f"Re-ranker {RERANK_MODEL}: " + ("cached" if rerank_cached else "downloading..."))
+    TextCrossEncoder(model_name=RERANK_MODEL, cache_dir=MODEL_CACHE,
+                     local_files_only=rerank_cached)
+
+    return embed_model
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--models-only" in sys.argv:
+        ensure_models()
+    else:
+        main()
