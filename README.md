@@ -7,24 +7,24 @@ Autonomous log investigation agent for NVIDIA Jetson Orin Nano. Searches hardwar
 Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 Nano 4B):
 
 ```
-+----------------------------------------------+
-|            Main Agent (Router)                |
-|                                              |
-|  search_logs          consult_manual         |
-|  send_email           reboot_device          |
-+--------+-----------------------+-------------+
++------------------------------------------+
+|           Main Agent (Router)            |
+|                                          |
+|  search_logs           consult_manual    |
+|  send_email            reboot_device     |
++--------+-----------------------+---------+
          |                       |
-+--------v-------------+ +------v----------------+
-| Log Search Sub-Agent | | Manual Consultant     |
-|                      | | Sub-Agent             |
-| Tool: shell          | |                       |
-| (grep, awk, date)    | | Tool: search_manual   |
-+--------+-------------+ | (FAISS + embeddings)  |
-         |                +------+----------------+
++--------v-----------+ +---------v-----------------+
+| Log Search         | | Manual Consultant         |
+| Sub-Agent          | | Sub-Agent                 |
+|                    | |                           |
+| Tool: shell        | | Tool: search_manual       |
+| (grep, awk, date)  | | (FAISS + embeddings)      |
++--------+-----------+ +---------+-----------------+
          |                       |
     demo_logs/             field_manual.md
-  app.log thermal.log      (12 incident
-    dmesg.log               sections)
+ app.log thermal.log      (12 incident sections)
+   dmesg.log
 ```
 
 **Main agent** follows an investigation procedure loaded from the field manual. It delegates log searching and manual lookups to specialized sub-agents, then decides whether to email ops or reboot.
