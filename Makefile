@@ -42,6 +42,7 @@ deploy:
 		--exclude 'models/' \
 		--exclude 'kb_index/' \
 		--exclude 'output/' \
+		--exclude 'demo_logs/' \
 		./ $(REMOTE):$(REMOTE_DIR)/
 
 # ── On Jetson ───────────────────────────────────────────────────────────────
