@@ -4,27 +4,37 @@ Autonomous log investigation agent for NVIDIA Jetson Orin Nano. Searches hardwar
 
 ## Why Run Agents on Edge Devices
 
-A GPU thermal throttle at 2 AM doesn't wait for a cloud API to respond. When a Jetson running inference pipelines on a factory floor hits a thermal cascade, the device needs to shed load in seconds — not minutes. An agent running locally on the device can read the logs, diagnose the root cause, and act immediately.
+Imagine a dozen Jetson Orin Nanos deployed on an offshore platform, running YOLOv8 inference on camera feeds 24/7 to monitor equipment, safety perimeters, and flare stacks. The nearest technician is a helicopter ride away, and satellite uplink costs dollars per megabyte.
 
-**No network dependency.** Edge devices operate in environments where connectivity is unreliable, metered, or restricted by policy. A surveillance system in a warehouse, a drone, or an offshore platform can't rely on cloud inference to reason about its own failures. The agent works identically whether the network is up or down.
+The deployment model is simple: inference nodes only run the camera pipelines, while a separate monitoring Jetson collects their logs and runs the agent. When something goes wrong, it diagnoses the problem locally and sends a structured email over satellite — a diagnosis, root cause, and specific fix. Not megabytes of raw telemetry.
 
-**Sensitive data stays on device.** Hardware logs contain thermal profiles, power rail voltages, inference pipeline configurations, and camera stream URLs — operational telemetry that reveals the physical topology and security posture of the deployment. Sending this to a cloud API for analysis is a data exfiltration risk. A local agent processes everything in a sandbox and only emits structured alerts.
+**No network dependency.** Edge devices operate in environments where connectivity is unreliable, metered, or restricted by policy. The agent works identically whether the network is up or down.
 
-**Cost at scale.** A fleet of hundreds of Jetson devices, each generating logs every 5 seconds, would rack up significant API costs if every investigation required cloud LLM calls. A local 4B model running on hardware that's already deployed and powered has zero marginal cost per query.
+**Sensitive data stays on device.** Hardware logs contain thermal profiles, power rail voltages, inference pipeline configurations, and camera stream URLs — operational telemetry that reveals the physical topology and security posture of the deployment. A local agent processes everything in a sandbox and only emits structured alerts.
 
-**Closed-loop autonomy.** The real value isn't just reading logs — it's acting on them. This agent follows a field manual to triage severity, looks up recommended actions, emails the ops team, and can reboot devices as a last resort. That closed loop only works reliably if it runs where the hardware is, without depending on external services that might be the reason things are failing in the first place.
+**Cost at scale.** A local 4B model running on hardware that's already deployed and powered has zero marginal cost per query.
 
-The trade-off is capability: a 4B model on a Jetson won't match a frontier model's reasoning. But for structured tasks with a well-defined procedure, a clear set of tools, and a domain-specific knowledge base — it's enough. The agent doesn't need to be creative. It needs to run `grep`, read the manual, and send an email.
+**Closed-loop autonomy.** The agent follows a field manual to triage severity, looks up recommended actions, emails the ops team, and can reboot devices as a last resort. That closed loop only works reliably if it runs where the hardware is, without depending on external services that might be the reason things are failing in the first place.
+
+For this class of operational task — following procedures, running shell commands, formatting structured reports — procedural reliability matters more than open-ended reasoning ability.
 
 ## Why Nemotron-3 Nano 4B
 
-The Jetson Orin Nano has 8GB of unified memory shared between CPU and GPU. Running a language model locally on this budget means every megabyte of KV cache matters — a standard transformer with full attention would exhaust memory after a few thousand tokens of context, leaving nothing for the inference pipelines the device is actually meant to run.
+The monitoring Jetson has 8 GB of unified memory. The agent stack needs an LLM, an embedding model, a cross-encoder re-ranker, a FAISS index, and a Python runtime — all within that budget.
 
-Nemotron-3 Nano 4B is a hybrid architecture that interleaves transformer attention layers with Mamba2 (selective state space) layers. Mamba2 layers process sequences in constant memory — they maintain a fixed-size hidden state rather than caching every past token's key-value pairs. Only the attention layers need a KV cache, and there are far fewer of them in the hybrid design.
+Nemotron-3 Nano 4B is a hybrid architecture with 42 layers, but only 4 of them are transformer attention layers (at positions 12, 17, 24, and 32). The remaining 38 are Mamba2 selective state space layers. The Mamba2 layers maintain a fixed-size state regardless of sequence length, so their memory use does not grow with context.
 
-The practical effect: Nemotron-3 Nano can run with a 16K context window on the Orin Nano while consuming a fraction of the KV cache memory that a pure transformer of the same size would need. This leaves enough headroom for the embedding model (fastembed/bge-small-en-v1.5), the FAISS index, and the Python agent runtime — all sharing that same 8GB.
+The measured memory allocation from llama.cpp:
 
-The Q4_K_M quantization (4-bit, ~2.8 GB on disk) further reduces the memory footprint while preserving enough quality for the structured reasoning this agent needs: parsing log timestamps, following a step-by-step procedure, and formatting email reports.
+| Component | Size | Notes |
+|-----------|------|-------|
+| KV cache (4 attention layers @ 16K) | 256 MiB | K: 128 MiB, V: 128 MiB |
+| Mamba2 recurrent state (38 layers) | 324 MiB | Fixed — does not grow with context |
+| Compute buffers | ~318 MiB | GPU + host |
+
+A pure transformer with 42 attention layers at the same dimensions would need roughly 2.6 GB of KV cache alone with a 16K context window. That would leave no room for the model weights, let alone an embedding model and re-ranker.
+
+In Q4_K_M quantization, the model file is about 2.8 GB on disk. In practice, that was enough to run a 16K context window together with the embedding model (BAAI/bge-small-en-v1.5, ~50 MB), re-ranker (Xenova/ms-marco-MiniLM-L-6-v2, ~80 MB), FAISS index, and Python runtime within the Orin Nano's 8 GB memory budget.
 
 ## Architecture
 
@@ -55,7 +65,7 @@ Three LangGraph ReAct agents connected to a local llama.cpp server (Nemotron-3 N
 
 **Log search sub-agent** knows the three log formats (ISO timestamps, syslog, dmesg seconds-since-boot) and the correct shell commands to filter each. Given a time window, it computes cutoffs, searches all files, and deduplicates repeated errors with counts and time ranges.
 
-**Manual consultant sub-agent** searches the knowledge base using two-stage retrieval: FAISS with dense embeddings (BAAI/bge-small-en-v1.5) for broad recall, then a cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2, 80MB) for precision. Returns severity, root causes, and recommended actions.
+**Manual consultant sub-agent** searches the knowledge base using two-stage retrieval: FAISS with dense embeddings (BAAI/bge-small-en-v1.5) for broad recall, then a cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2, 80 MB) for precision. Returns severity, root causes, and recommended actions.
 
 ## Synthetic Log Scenario
 
@@ -86,9 +96,9 @@ Three log files:
 | `thermal.log` | Syslog (`Mar 24 17:00:00`) | `ERROR/WARN/INFO` |
 | `dmesg.log` | Seconds since boot (`[82810.000000]`) | `CRITICAL/WARNING` |
 
-## Field Manual
+## Knowledge Base
 
-The `docs/` directory is the knowledge base — all Markdown files are chunked by `##` headings, embedded, and indexed with FAISS. A cross-encoder re-ranker (Xenova/ms-marco-MiniLM-L-6-v2) improves retrieval precision at query time.
+The `docs/` directory is the knowledge base — all Markdown files are chunked by `##` headings, embedded, and indexed with FAISS. A cross-encoder re-ranker improves retrieval precision at query time.
 
 **`field_manual.md`** is the primary source. It contains:
 
@@ -119,10 +129,26 @@ The `docs/` directory is the knowledge base — all Markdown files are chunked b
 
 Updating any doc in `docs/` changes what the agent knows — no code changes needed. The FAISS index is rebuilt automatically when any doc changes.
 
+## Performance
+
+Measured from llama.cpp server logs during a real investigation:
+
+| Metric | Value |
+|--------|-------|
+| Model | Nemotron-3 Nano 4B Q4_K_M |
+| Context window | 16,384 tokens |
+| Generation speed | ~15.5 tokens/sec (consistent across all calls) |
+| Prompt eval speed | 135–400 tokens/sec (varies with cache hits) |
+| Log search shell calls | 5–8 seconds each |
+| Log search summarization | ~2.5 minutes (2,423 tokens generated) |
+| Manual lookup | ~16 seconds |
+| Main agent final response | ~48 seconds (722 tokens generated) |
+| Full investigation wall time | ~6 minutes end to end |
+
 ## Prerequisites
 
 **Hardware:**
-- NVIDIA Jetson Orin Nano (8GB)
+- NVIDIA Jetson Orin Nano (8 GB)
 - SSD storage (model, swap, project files)
 
 **Software on Jetson:**
@@ -161,7 +187,7 @@ cd jetson-nano-log-agent
 make setup
 ```
 
-This creates swap, installs deps, and downloads the model — all locally.
+This creates swap, installs deps, downloads all models, and builds the index — all locally.
 
 **From a dev machine (deploys via SSH):**
 ```bash
@@ -179,17 +205,17 @@ This rsyncs the code to the Jetson, then runs `make setup` there via SSH.
 
 Either way, setup:
 1. Checks for bubblewrap, socat, and llama.cpp (fails early if missing)
-2. Creates 8GB swap on SSD (prevents OOM with LLM + embeddings)
+2. Creates 8 GB swap on SSD (prevents OOM with LLM + embeddings)
 3. Creates Python venv with uv
 4. Installs dependencies (langchain-openai, langgraph, fastembed, faiss-cpu)
-5. Downloads Nemotron-3 Nano 4B GGUF (~2.8 GB)
-6. Builds FAISS index from `docs/` (downloads embedding model + re-ranker on first run, ~130 MB total)
+5. Downloads all models: Nemotron-3 Nano 4B GGUF (~2.8 GB) + ONNX embedder + re-ranker (~130 MB)
+6. Builds FAISS index from `docs/`
 
 ### Manual setup (step by step)
 
 ```bash
 cd /ssd/jetson-log-agent
-make swap             # 8G swapfile on SSD (idempotent, persistent)
+make swap             # 8 GB swapfile on SSD (idempotent, persistent)
 make install          # venv + deps (checks for bubblewrap, socat, llama.cpp)
 make download-models  # All models: LLM GGUF + ONNX embedder + re-ranker
 make build-index      # FAISS index from docs/
@@ -216,7 +242,7 @@ This generates fresh logs, rebuilds the FAISS index if any doc changed, and laun
 ```
 Jetson Log Agent ready. Type your question (or 'quit' to exit).
 
-You: any errors in the past 2 hours?
+You: check last hour
 ```
 
 ### Example session
@@ -276,7 +302,7 @@ Email sent to ops-team@company.com. No reboot required — thermal cascade self-
 The agent:
 1. Delegates log searching to the log sub-agent (cyan `[logs]` prefix) — computes cutoffs for all three log formats, searches each file with time filtering, deduplicates
 2. Groups related errors (thermal throttle + deadline misses = one incident) and consults the field manual via the manual sub-agent (green `[manual]` prefix) — two-stage FAISS + cross-encoder re-ranking
-3. Sends an email with error details and recommended actions from the manual (yellow `[email]`)
+3. Sends a structured email with error details and recommended actions from the manual (yellow `[email]`)
 4. Summarizes with root cause chain, evidence from all three log files, and specific remediation steps
 5. Checks reboot policy — not needed since the thermal cascade self-recovered
 
@@ -315,7 +341,7 @@ This is a Critical severity issue requiring immediate attention.
 
 ## Sandbox
 
-The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox:
+Since the agent runs shell commands against log files, sandboxing is a first-class requirement. The agent runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox:
 
 | Mount | Mode | Purpose |
 |-------|------|---------|
@@ -350,9 +376,9 @@ Process isolation: PID, IPC, UTS namespaces. Clean environment. Network is fully
 
 | Target | Run from | Description |
 |--------|----------|-------------|
-| `make deploy` | Dev machine | Rsync project to Jetson |
 | `make setup` | Either | Auto-detects Jetson; runs locally or deploys via SSH |
-| `make swap` | Jetson | Create 8G SSD swapfile (idempotent) |
+| `make deploy` | Dev machine | Rsync project to Jetson |
+| `make swap` | Jetson | Create 8 GB SSD swapfile (idempotent) |
 | `make install` | Jetson | Create venv, install Python deps |
 | `make download-models` | Jetson | Download all models (LLM GGUF + ONNX embedder + re-ranker) |
 | `make hf-login` | Jetson | Authenticate with HuggingFace (faster downloads) |
