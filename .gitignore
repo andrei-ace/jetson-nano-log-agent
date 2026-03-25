@@ -6,3 +6,4 @@ kb_index/
 output/
 demo_logs/
 .llama-bridge.sock
+tmp/
