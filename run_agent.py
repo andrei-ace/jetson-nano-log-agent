@@ -16,7 +16,7 @@ LOG_DIR = os.environ.get("LOG_DIR", "/workspace/demo_logs")
 KB_DIR = os.environ.get("KB_DIR", "./kb_index")
 ACTION_LOG = os.environ.get("ACTION_LOG",
                             os.environ.get("EMAIL_LOG", "/tmp/actions.log"))
-MAX_OUTPUT = 2000
+MAX_OUTPUT = 4000
 CMD_TIMEOUT = 10
 
 SHELL_ENV = {
@@ -272,15 +272,14 @@ STEP 1: Compute cutoffs.
   DMESG_LAST=$(tail -1 dmesg.log | sed 's/\\[\\([0-9.]*\\)\\].*/\\1/')
   DMESG_CUT=$(echo "$DMESG_LAST - SECONDS" | bc)
 
-STEP 2: Get error counts per type (compact output).
-  awk -v c=$ISO_CUT '$1>=c' app.log | grep -E 'level=ERROR|level=WARN' | sed 's/.*component=[^ ]* //' | cut -d' ' -f1 | sort | uniq -c | sort -rn
-  awk -v c=$SYS_CUT '$3>=c' thermal.log | grep -E 'ERROR|WARN' | sed 's/.*\\] //' | sort | uniq -c | sort -rn
-  awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c' dmesg.log | grep -E 'CRITICAL|WARNING'
+STEP 2: Search each file (one command per file).
+  awk -v c=$ISO_CUT '$1>=c && /level=ERROR/' app.log
+  awk -v c=$ISO_CUT '$1>=c && /level=WARN/' app.log
+  awk -v c=$SYS_CUT '$3>=c && /ERROR|WARN/' thermal.log
+  awk -F'[][]' -v c=$DMESG_CUT '$2+0>=c && /CRITICAL|WARNING/' dmesg.log
 
-STEP 3: For errors with count > 1, get first and last to find time range.
-  awk -v c=$ISO_CUT '$1>=c' app.log | grep 'error msg' | sed -n '1p;$p'
-
-Report: error type, count, time range, affected pipelines."""
+Deduplicate: if the same error repeats, report it once with the count \
+and time range."""
 
 _log_agent = None
 
